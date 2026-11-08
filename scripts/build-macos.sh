@@ -15,4 +15,9 @@ cp LICENSE THIRD_PARTY_NOTICES.txt "$APP/Contents/Resources/"
 cp licenses/Apache-2.0.txt "$APP/Contents/Resources/licenses/"
 codesign --force --sign - "$APP/Contents/Resources/torrstream-lite"
 codesign --force --sign - "$APP"
+# Finder and the Dock cache an app's icon by the bundle's date, which copying files
+# into it doesn't change. Bump it and re-register, so a rebuild shows the current icon.
+touch "$APP"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+if [ -x "$LSREGISTER" ]; then "$LSREGISTER" -f "$APP"; fi
 printf 'Built %s\n' "$APP"

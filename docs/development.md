@@ -15,7 +15,7 @@ Run the commands below from the repository root.
 sh scripts/build-macos.sh
 ```
 
-Open **`dist/TorrStream Lite.app`**. Quit and reopen the app after rebuilding, to load the new server. The files in `ui/` are compiled into the server, so rebuild after editing them too. The app is ad-hoc signed, not notarized. The window, the player and the video decoder use memory of their own, apart from the server memory the app shows.
+Open **`dist/TorrStream Lite.app`**. Quit and reopen the app after rebuilding, to load the new server. The build also updates the app's date and registers it with macOS, which keep Finder and the Dock from showing an old, cached icon. If the Dock still shows one, restart it with `killall Dock`. The files in `ui/` are compiled into the server, so rebuild after editing them too. The app is ad-hoc signed, not notarized. The window, the player and the video decoder use memory of their own, apart from the server memory the app shows.
 
 Packaging a DMG (`sh scripts/package-macos.sh`, into `release-assets/`) and the Keenetic build ([router.md](router.md)) are separate steps.
 
