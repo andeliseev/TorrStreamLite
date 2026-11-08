@@ -10,7 +10,12 @@ Stream torrents on your Mac or your TV without saving them to disk. A small torr
 - Light or dark look, following the system or your choice in Settings
 - An experimental build for Keenetic routers runs the same server without a Mac
 
-An independent project inspired by [TorrServer](https://github.com/YouROK/TorrServer), with a compatible playback API for Lampa.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-dark.png">
+  <img src="docs/images/screenshot-light.png" alt="TorrStream Lite playing an episode of a series, with the download speed, cache, memory and home network address in the sidebar">
+</picture>
+
+An independent project inspired by [TorrServer](https://github.com/YouROK/TorrServer), with a compatible playback API for Lampa. Website: [andeliseev.github.io/torrstream-lite](https://andeliseev.github.io/torrstream-lite/).
 
 ## Download
 
@@ -56,6 +61,8 @@ TorrStream Lite runs on your computer. It has no account, no analytics and no se
 - **Torrent URLs:** when you add a torrent by its URL, the app downloads the .torrent file from that address.
 - **Nothing is kept:** the video stays in RAM and is released when you stop the torrent or quit. There's no history and no library. Lampa's watched positions last only until the torrent is stopped.
 - **Settings:** the Mac app saves only the home network switch and port, the appearance, and the window's size and position.
+
+Read the full [privacy policy](https://andeliseev.github.io/torrstream-lite/privacy.html).
 
 ## Current limits
 

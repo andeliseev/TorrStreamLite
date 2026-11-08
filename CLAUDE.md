@@ -10,6 +10,7 @@
 - `python3 tests/release.py`, `node tests/peer-rates.cjs`: release helper and peer speed tests
 - `npx prettier@3.6.2 --write ui/` and `xcrun swift-format format --in-place macos/App.swift`: formatting for the page and the Mac app
 - `xcrun swift scripts/make-icon.swift`: regenerate `macos/AppIcon.icns` from `app-icon.svg`
+- `python3 scripts/screenshots/make.py`: render the README and website screenshots from `ui/`
 
 ## Working rules
 
@@ -23,5 +24,6 @@
 - Errors returned to the UI are shown as they are; write them for people.
 - Commits use the author set in this repo's git config. Never add `Co-Authored-By` lines or any other Claude/AI attribution to commit messages, pull requests or release notes.
 - `README.md` stays user-facing (download, first launch, use, privacy). Developer details go in `docs/`.
+- The website's pages live in the unified-mail repo, `site/torrstream-lite/` ([docs/development.md](docs/development.md#website)). After a visible UI change, render the screenshots again and copy them there; when what the app connects to or keeps changes, update its privacy policy.
 - When behavior changes, update the matching file in `docs/`. Add things you notice but don't do to `docs/todo.md`.
 - Every change people using the app would notice gets a line under **Unreleased** in [CHANGELOG.md](CHANGELOG.md), written for them (what changed for them, not how), in the same commit. The Release workflow turns those lines into the release's notes. Changes only to docs, tests or the release tooling don't go there.

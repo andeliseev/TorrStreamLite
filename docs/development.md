@@ -95,7 +95,7 @@ These aren't router benchmarks or a guarantee for Internet swarms, and there's n
 | `src/` | Rust server: HTTP API, RAM cache, TV access |
 | `ui/` | Control page; compiled into the server |
 | `macos/` | Native Mac window and `Info.plist` |
-| `scripts/` | Mac build and DMG, Keenetic build, Rust toolchain helper, release helper, app icon |
+| `scripts/` | Mac build and DMG, Keenetic build, Rust toolchain helper, release helper, app icon, screenshots |
 | `tests/` | Local torrent peer, streaming, memory, network, Lampa and release tests |
 | `vendor/` | The pinned librqbit engine with local changes ([UPSTREAM.md](../vendor/UPSTREAM.md)) |
 | `docs/` | These notes |
@@ -110,6 +110,26 @@ The icon is drawn in [`app-icon.svg`](../app-icon.svg), built like Unified Mail'
 ```sh
 xcrun swift scripts/make-icon.swift
 ```
+
+## Screenshots
+
+The README and the website show [`docs/images/screenshot-light.png`](images/screenshot-light.png) and [`screenshot-dark.png`](images/screenshot-dark.png). They're the real `ui/` files rendered in WebKit, like in the Mac app, with the sample data in `scripts/screenshots/mock.js`. After a visible change to the UI, render them again and copy them to the website:
+
+```sh
+python3 scripts/screenshots/make.py
+```
+
+With Pillow installed (`pip install pillow`) they're reduced to 256 colors, about a third of the size.
+
+## Website
+
+The home page, privacy policy and support page are at <https://andeliseev.github.io/torrstream-lite/>. Their source is in the [unified-mail](https://github.com/andeliseev/unified-mail) repository, in `site/torrstream-lite/`, next to Unified Mail's pages: its `site/` folder is the whole of andeliseev.github.io. After changing them there, commit on its own (the message becomes public in the site's history) and publish from unified-mail:
+
+```sh
+git subtree push --prefix=site https://github.com/andeliseev/andeliseev.github.io.git main
+```
+
+If what the app connects to or keeps changes, update `privacy.html` and its effective date.
 
 ## Code formatting
 

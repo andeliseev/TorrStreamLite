@@ -34,13 +34,14 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 - [x] One-click Release workflow with release notes from `CHANGELOG.md`
 - [ ] Code signing and notarization
-- [ ] Screenshots in the README, light and dark, as in Unified Mail's
+- [x] Screenshots in the README, light and dark, as in Unified Mail's
+- [x] A website: home page, privacy policy and support page
 - [ ] A Windows version. The server is mostly portable (`network.rs` and `memory.rs` need Windows code). The window could move from Swift to Tauri 2, as in Unified Mail, which would also bring Windows installers, auto-update and a universal Mac build
 
 ## Code quality
 
-- [ ] Unit tests for `origin_allowed` and the compatibility routes in `server.rs`
-- [ ] `api()` in `ui/app.js` parses JSON before checking the status, so a plain-text error (such as a refused origin) shows a parser message instead
-- [ ] An engine error shown under the add form stays after the torrent recovers, until the next add or Stop
+- [ ] Unit tests for the compatibility routes in `server.rs` (`origin_allowed`, the Host check and the cross-site rule have them)
+- [x] `api()` in `ui/app.js` shows plain-text errors (such as a refused origin) instead of a JSON parser message
+- [ ] An engine error banner stays after the torrent recovers, until it's dismissed
 - [ ] `stream_file` wraps its channel receiver with the `async-stream` crate; `futures::stream::poll_fn` would do it without the extra dependency
 - [ ] Rename the bundle identifier `local.torrstream-lite.mac` to a reverse-DNS name before the first notarized release (it resets the saved TV settings once)
