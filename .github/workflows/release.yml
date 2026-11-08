@@ -1,19 +1,24 @@
+# One-click release: Actions → Release → Run workflow.
+# Tests the server, then builds the Mac app and/or the Keenetic router binary and publishes
+# them as a GitHub Release. It uses only the built-in GITHUB_TOKEN, so no secrets are needed.
+# How it works, and what to do when a run fails: docs/development.md#releases-github-actions
 name: Release
+run-name: Release (${{ inputs.version || inputs.bump }}, ${{ inputs.platforms }})
 
 on:
   workflow_dispatch:
     inputs:
       bump:
-        description: Version bump (first release uses the source version)
+        description: "Raise the last released version: patch for fixes (0.2.2 → 0.2.3), minor for new features (→ 0.3.0), major (→ 1.0.0)"
         type: choice
         options: [patch, minor, major]
         default: patch
       version:
-        description: Exact version, e.g. 0.3.0 (optional; overrides bump)
+        description: Or enter an exact version instead, e.g. 0.3.0. Leave empty to use the choice above.
+        required: false
         type: string
-        default: ''
       platforms:
-        description: Platforms to release
+        description: "What to build: the Mac app (Apple Silicon .dmg), the Keenetic router binary, or both."
         type: choice
         options: [macOS, macOS and Keenetic, Keenetic]
         default: macOS
@@ -26,123 +31,190 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  checks:
-    uses: ./.github/workflows/ci.yml
+  # The checks from docs/development.md#tests, plus the streaming, Lampa and TV access tests
+  # against a local BitTorrent peer. Nothing is committed or built for release if they fail.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: python3 tests/release.py
+      - run: node tests/peer-rates.cjs
+      - run: cargo build --locked
+      - run: python3 tests/e2e.py --binary target/debug/torrstream-lite --size-mib 32 --corrupt-first
+      - run: python3 tests/lampa.py --binary target/debug/torrstream-lite
+      # Uses the runner's private network address, like a TV on a home network.
+      - run: python3 tests/network.py --binary target/debug/torrstream-lite
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: test-results
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
 
   prepare:
-    needs: checks
+    name: Prepare
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
-      sha: ${{ steps.version.outputs.sha }}
-      matrix: ${{ steps.matrix.outputs.matrix }}
-      release_id: ${{ steps.release.outputs.release_id }}
+      sha: ${{ steps.commit.outputs.sha }}
+      release_id: ${{ steps.release.outputs.id }}
+      matrix: ${{ steps.platforms.outputs.matrix }}
     steps:
-      - name: Require main branch
+      - name: Check branch
         env:
-          SELECTED_REF: ${{ github.ref }}
-        run: test "$SELECTED_REF" = refs/heads/main
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-      - name: Select and commit version
-        id: version
-        env:
-          BUMP: ${{ inputs.bump }}
-          EXACT_VERSION: ${{ inputs.version }}
+          REF: ${{ github.ref }}
         run: |
-          VERSION=$(python3 scripts/release.py next --bump "$BUMP" --version "$EXACT_VERSION")
-          python3 scripts/release.py set "$VERSION"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.toml Cargo.lock macos/Info.plist
-          if ! git diff --cached --quiet; then
-            git commit -m "Release v$VERSION"
+          if [ "$REF" != refs/heads/main ]; then
+            echo "::error::Run the release from main, not $REF."
+            exit 1
           fi
-          git push origin HEAD:main
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Select platforms
-        id: matrix
+
+      - name: Choose platforms
+        id: platforms
         env:
           PLATFORMS: ${{ inputs.platforms }}
         run: |
-          python3 - <<'PY'
-          import json, os
-          selected = os.environ['PLATFORMS']
-          builds = []
-          if selected in ('macOS', 'macOS and Keenetic'):
-              builds.append({'platform': 'macos', 'runner': 'macos-15'})
-          if selected in ('Keenetic', 'macOS and Keenetic'):
-              builds.append({'platform': 'keenetic', 'runner': 'ubuntu-latest'})
-          if not builds:
-              raise ValueError('Unsupported platform selection')
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('matrix=' + json.dumps({'include': builds}) + '\n')
-          PY
+          macos='{"name": "macOS", "platform": "macos", "os": "macos-15"}'
+          keenetic='{"name": "Keenetic", "platform": "keenetic", "os": "ubuntu-latest"}'
+          case "$PLATFORMS" in
+            macOS) matrix="[$macos]" ;;
+            Keenetic) matrix="[$keenetic]" ;;
+            *) matrix="[$macos, $keenetic]" ;;
+          esac
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+
+      - name: Set version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXACT: ${{ inputs.version }}
+        run: |
+          next=$(python3 scripts/release.py next --bump "$BUMP" --version "$EXACT")
+          echo "$next" >> "$GITHUB_OUTPUT"
+          version=$(echo "$next" | sed -n 's/^version=//p')
+          last=$(echo "$next" | sed -n 's/^last=//p')
+          # After a failed run the files may already have this version; setting it again changes nothing.
+          python3 scripts/release.py set "$version"
+          # CHANGELOG.md's Unreleased notes become this version's; the version commit includes it.
+          python3 scripts/release.py changelog "$version" > "$RUNNER_TEMP/notes.md"
+          if ! grep -q . "$RUNNER_TEMP/notes.md"; then
+            echo "::warning::CHANGELOG.md has nothing under Unreleased, so this release has no What's new."
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing **v$version** (last release: $last)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit version change
+        id: commit
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "Release $TAG"
+            git push origin HEAD:main
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Create draft release
         id: release
         uses: actions/github-script@v9
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-          RELEASE_SHA: ${{ steps.version.outputs.sha }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ steps.commit.outputs.sha }}
           PLATFORMS: ${{ inputs.platforms }}
+          NOTES: ${{ runner.temp }}/notes.md
         with:
           script: |
-            const tag = `v${process.env.VERSION}`;
+            const { TAG: tag, SHA: sha, PLATFORMS: platforms } = process.env;
+            const notes = require('fs').readFileSync(process.env.NOTES, 'utf8').trim();
             const releases = await github.paginate(github.rest.repos.listReleases, context.repo);
-            const old = releases.find(r => r.tag_name === tag);
-            if (old && !old.draft) throw new Error(`${tag} is already published`);
-            // A failed run can be retried without retaining stale build assets.
-            if (old) await github.rest.repos.deleteRelease({...context.repo, release_id: old.id});
-            const notes = await github.rest.repos.generateReleaseNotes({
-              ...context.repo, tag_name: tag, target_commitish: process.env.RELEASE_SHA
-            });
+            if (releases.some((r) => r.tag_name === tag && !r.draft)) {
+              core.setFailed(`${tag} is already published.`);
+              return;
+            }
+            // A draft left behind by a failed run is replaced.
+            for (const old of releases.filter((r) => r.draft && r.tag_name === tag)) {
+              await github.rest.repos.deleteRelease({ ...context.repo, release_id: old.id });
+            }
+            // Only mention the platforms this release has downloads for.
+            const macos = platforms !== 'Keenetic';
+            const keenetic = platforms !== 'macOS';
+            const repo = `https://github.com/${context.repo.owner}/${context.repo.repo}`;
             const body = [
-              `TorrStream Lite ${process.env.VERSION} — ${process.env.PLATFORMS}.`,
-              'macOS: Apple Silicon, macOS 12+. The app is ad-hoc signed, not notarized.',
-              'Keenetic: static ARM64 Linux binary. Router playback performance still needs device testing.',
-              'One active torrent; RAM-only cache; Lampa-compatible API subset. See README for setup.',
-              'SHA-256 checksum files are included for each download.',
-              notes.data.body
-            ].join('\n\n');
-            const result = await github.rest.repos.createRelease({
-              ...context.repo, tag_name: tag, target_commitish: process.env.RELEASE_SHA,
-              name: `TorrStream Lite ${tag}`, body, draft: true, prerelease: false
+              ...(notes ? ["## What's new", notes, ''] : []),
+              '## Download',
+              ...(macos ? ['- **macOS** (Apple Silicon, macOS 12 or later): the `.dmg`'] : []),
+              ...(keenetic ? [`- **Keenetic** (ARM64 router with Entware): the \`linux-arm64.tar.gz\`. Experimental, not yet tested on a router; see the [setup](${repo}/blob/main/docs/router.md)`] : []),
+              '',
+              'Each download has a `.sha256` checksum file next to it.',
+              ...(macos ? ['', 'The Mac app isn\'t notarized, so macOS asks once before opening it: open the app, then go to **System Settings → Privacy & Security** and click **Open Anyway**.'] : []),
+            ].join('\n');
+            const { data } = await github.rest.repos.createRelease({
+              ...context.repo,
+              tag_name: tag,
+              target_commitish: sha,
+              name: `TorrStream Lite ${tag}`,
+              body,
+              draft: true,
             });
-            core.setOutput('release_id', result.data.id);
+            core.setOutput('id', data.id);
 
   build:
+    name: Build (${{ matrix.name }})
     needs: prepare
-    name: Build ${{ matrix.platform }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-    runs-on: ${{ matrix.runner }}
+      matrix:
+        # The platforms chosen in the Prepare job.
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.sha }}
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.platform }}
-      - name: Build Mac app and DMG
+
+      - name: Build the Mac app and DMG
         if: matrix.platform == 'macos'
         run: |
           test "$(uname -m)" = arm64
           sh scripts/build-macos.sh
           codesign --verify --deep --strict "dist/TorrStream Lite.app"
+          # The server inside the app must answer Lampa like the one the Test job checked.
           python3 tests/lampa.py --binary "dist/TorrStream Lite.app/Contents/Resources/torrstream-lite"
           sh scripts/package-macos.sh
-      - name: Build static Keenetic executable
+
+      - name: Build the static Keenetic binary
         if: matrix.platform == 'keenetic'
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -158,6 +230,7 @@ jobs:
           tar -czf "release-assets/TorrStream-Lite-$VERSION-linux-arm64.tar.gz" \
             LICENSE THIRD_PARTY_NOTICES.txt licenses/Apache-2.0.txt \
             -C dist torrstream-lite-linux-arm64
+
       - name: Add checksums
         run: |
           python3 - <<'PY'
@@ -168,7 +241,8 @@ jobs:
                   digest = hashlib.sha256(asset.read_bytes()).hexdigest()
                   asset.with_name(asset.name + '.sha256').write_text(f'{digest}  {asset.name}\n')
           PY
-      - name: Attach assets to draft
+
+      - name: Upload to the draft release
         uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
@@ -177,24 +251,29 @@ jobs:
             const fs = require('fs');
             for (const name of fs.readdirSync('release-assets').sort()) {
               await github.rest.repos.uploadReleaseAsset({
-                ...context.repo, release_id: Number(process.env.RELEASE_ID),
-                name, data: fs.readFileSync(`release-assets/${name}`)
+                ...context.repo,
+                release_id: Number(process.env.RELEASE_ID),
+                name,
+                data: fs.readFileSync(`release-assets/${name}`),
               });
             }
 
+  # Publish only when every build succeeded, so a release is never half-empty.
   publish:
+    name: Publish
     needs: [prepare, build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Publish after all selected builds succeed
-        uses: actions/github-script@v9
+      - uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
         with:
           script: |
-            const result = await github.rest.repos.updateRelease({
-              ...context.repo, release_id: Number(process.env.RELEASE_ID),
-              draft: false, make_latest: 'true'
+            const { data } = await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: Number(process.env.RELEASE_ID),
+              draft: false,
+              make_latest: 'true',
             });
-            await core.summary.addLink('Download release', result.data.html_url).write();
+            await core.summary.addRaw(`Published [${data.name}](${data.html_url})`, true).write();

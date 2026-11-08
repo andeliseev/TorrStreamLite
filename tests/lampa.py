@@ -2,8 +2,10 @@
 """Lampa's TorrServer HTTP contract with a real local BitTorrent peer.
 
 Request shapes follow yumata/lampa-source's torserver.js and reguest.js:
-JSON bodies with jQuery's default form content type, and opaque TV origins.
-This verifies the protocol, not the physical Samsung TV or its video decoder.
+JSON bodies with jQuery's default form content type, from Lampa's web origin.
+The opaque "null" origin of TV apps is accepted only on listeners that face the
+home network, so tests/network.py checks it on the TV listener; here it must be
+refused. This verifies the protocol, not the physical Samsung TV or its decoder.
 """
 import argparse
 import json
@@ -16,6 +18,8 @@ import urllib.parse
 import urllib.request
 
 from e2e import Swarm, payload
+
+LAMPA = 'https://lampa.mx'
 
 
 def main():
@@ -58,8 +62,10 @@ def main():
             else:
                 raise AssertionError('Server did not start')
 
-            def request(path, data=None, origin='null', method=None, headers=None, timeout=10):
-                h = {'Origin': origin, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
+            def request(path, data=None, origin=LAMPA, method=None, headers=None, timeout=10):
+                h = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
+                if origin:
+                    h['Origin'] = origin
                 h.update(headers or {})
                 body = json.dumps(data).encode() if data is not None else None
                 return opener.open(urllib.request.Request(base + path, data=body, headers=h,
@@ -67,7 +73,7 @@ def main():
 
             def api(path, data=None, **kwargs):
                 with request(path, data, **kwargs) as response:
-                    assert response.headers['Access-Control-Allow-Origin'] == kwargs.get('origin', 'null')
+                    assert response.headers['Access-Control-Allow-Origin'] == kwargs.get('origin', LAMPA)
                     return json.load(response)
 
             def error(code, path, **kwargs):
@@ -89,12 +95,19 @@ def main():
                 assert 'Version 2.0, January 2004' in notices
             mark('Offline app and engine license notices; idle peer response')
 
-            for origin in ('null', 'http://lampa.mx', 'https://lampa.mx', 'http://lampa.app', 'https://lampa.app'):
+            for origin in ('http://lampa.mx', 'https://lampa.mx', 'http://lampa.app', 'https://lampa.app'):
                 with request('/', origin=origin) as response:
                     assert response.status == 200
                 settings = api('/settings', {'action': 'get'}, origin=origin)
                 assert settings['CacheSize'] == 6 * 1048576 and not settings['UseDisk']
-            mark('Lampa ping and playback connection accept form-labelled JSON and TV/web origins')
+            mark('Lampa ping and playback connection accept form-labelled JSON and Lampa web origins')
+            # Any web page can send "null" from a sandboxed frame; the loopback server refuses it.
+            error(403, '/settings', origin='null', data={'action': 'get'})
+            error(403, '/torrents', origin='null', data={'action': 'list'})
+            # A page that rebinds its own domain to this address still sends that domain.
+            error(403, '/settings', data={'action': 'get'}, headers={'Host': 'rebind.example:8090'})
+            error(403, '/api/status', origin=None, headers={'Host': 'rebind.example'})
+            mark('Loopback server refuses the null origin and unknown host names')
             with request('/settings', method='OPTIONS', headers={
                 'Access-Control-Request-Method': 'POST',
                 'Access-Control-Request-Headers': 'content-type',
@@ -113,6 +126,11 @@ def main():
             mark('Compatibility CORS does not grant access to native network controls or unrelated sites')
 
             torrent_url = swarm.tracker_url.replace('/announce', '/file.torrent')
+            # An <img> or <video> tag on another site: no Origin header, cross-site fetch metadata.
+            error(403, '/stream?' + urllib.parse.urlencode({'link': torrent_url, 'index': 1, 'play': ''}),
+                  origin=None, headers={'Sec-Fetch-Site': 'cross-site'})
+            assert api('/api/status', origin=base)['torrent'] is None
+            mark('A stream URL loaded from another site cannot add a torrent')
             torrent = api('/torrents', {'action': 'add', 'link': torrent_url,
                                       'title': '[LAMPA] Local movie', 'poster': '',
                                       'data': '{}', 'category': 'movie', 'save_to_db': 'false'})

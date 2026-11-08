@@ -3,6 +3,26 @@ import Darwin
 import UniformTypeIdentifiers
 import WebKit
 
+/// Covers the transparent titlebar band above the page, so dragging there moves the
+/// window and a double-click does what the user chose in System Settings.
+final class TitlebarDragView: NSView {
+  override var mouseDownCanMoveWindow: Bool { true }
+
+  override func mouseDown(with event: NSEvent) {
+    guard let window else { return }
+    guard event.clickCount == 2 else {
+      window.performDrag(with: event)
+      return
+    }
+    // Desktop & Dock → "Double-click a window's title bar to".
+    switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+    case "Minimize": window.performMiniaturize(nil)
+    case "None": break
+    default: window.performZoom(nil)
+    }
+  }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
   WKScriptMessageHandler
 {
@@ -13,57 +33,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   var startupText = ""
   var serverURL: URL?
 
+  /// The page's main background, so nothing flashes while it loads or the window resizes.
+  static let pageBackground = NSColor(name: nil) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      ? NSColor(srgbRed: 26 / 255, green: 28 / 255, blue: 32 / 255, alpha: 1) : .white
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
-    let menu = NSMenu()
-    let root = NSMenuItem()
-    menu.addItem(root)
-    let appMenu = NSMenu()
-    appMenu.addItem(
-      withTitle: "About TorrStream Lite", action: #selector(openSettings), keyEquivalent: "")
-    appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
-    appMenu.addItem(NSMenuItem.separator())
-    appMenu.addItem(
-      withTitle: "Quit TorrStream Lite", action: #selector(NSApplication.terminate(_:)),
-      keyEquivalent: "q")
-    root.submenu = appMenu
-    let editRoot = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
-    let edit = NSMenu(title: "Edit")
-    edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-    edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-    edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-    edit.addItem(
-      withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-    editRoot.submenu = edit
-    menu.addItem(editRoot)
-    NSApp.mainMenu = menu
+    let defaults = UserDefaults.standard
+    let theme =
+      ["light", "dark"].contains(defaults.string(forKey: "appearance"))
+      ? defaults.string(forKey: "appearance")! : "system"
+    applyAppearance(theme)
+    NSApp.mainMenu = makeMenu()
+
+    // The page runs under a transparent titlebar: one surface, with the window
+    // buttons over the sidebar. The page leaves that band free of controls.
     window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false
-    )
+      contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+      backing: .buffered, defer: false)
     window.title = "TorrStream Lite"
-    window.minSize = NSSize(width: 740, height: 560)
+    window.titleVisibility = .hidden
+    window.titlebarAppearsTransparent = true
+    window.minSize = NSSize(width: 720, height: 520)
+    window.backgroundColor = Self.pageBackground
+    let content = window.contentView!
+    let measured = content.bounds.height - window.contentLayoutRect.height
+    let titlebar = measured > 0 ? measured : 28
+
+    let tvEnabled = defaults.bool(forKey: "tvAccessEnabled")
+    let storedPort = defaults.integer(forKey: "tvAccessPort")
+    let tvPort = (1024...65535).contains(storedPort) ? storedPort : 8090
     let configuration = WKWebViewConfiguration()
-    let tvEnabled = UserDefaults.standard.bool(forKey: "tvAccessEnabled")
-    let storedPort = UserDefaults.standard.integer(forKey: "tvAccessPort")
-    let tvPort = (1024...65535).contains(storedPort) ? storedPort : 8091
     configuration.userContentController.addUserScript(
       WKUserScript(
-        source:
-          "window.torrstreamDesktop = true; window.torrstreamTV = {enabled: \(tvEnabled), port: \(tvPort)};",
+        source: """
+          window.torrstreamDesktop = true;
+          window.torrstreamTV = {enabled: \(tvEnabled), port: \(tvPort)};
+          window.torrstreamTheme = "\(theme)";
+          document.documentElement.style.setProperty("--titlebar", "\(Int(titlebar))px");
+          """,
         injectionTime: .atDocumentStart, forMainFrameOnly: true))
     configuration.userContentController.add(self, name: "desktop")
-    web = WKWebView(frame: window.contentView!.bounds, configuration: configuration)
+    web = WKWebView(frame: content.bounds, configuration: configuration)
     web.autoresizingMask = [.width, .height]
     web.navigationDelegate = self
     web.uiDelegate = self
-    window.contentView!.addSubview(web)
+    web.underPageBackgroundColor = Self.pageBackground
+    content.addSubview(web)
+    let drag = TitlebarDragView(
+      frame: NSRect(
+        x: 0, y: content.bounds.height - titlebar, width: content.bounds.width, height: titlebar))
+    drag.autoresizingMask = [.width, .minYMargin]
+    content.addSubview(drag)
     web.loadHTMLString(
-      "<body style='background:#0e131b;color:#8ee1c1;font:20px -apple-system;padding:60px'>Starting TorrStream Lite…</body>",
+      """
+      <meta name="color-scheme" content="light dark"><style>
+      body{margin:0;height:100vh;display:grid;place-items:center;font:13px -apple-system,sans-serif;background:#fff;color:#6b7280}
+      @media (prefers-color-scheme:dark){body{background:#1a1c20;color:#9298a2}}
+      </style><body>Starting TorrStream Lite…</body>
+      """,
       baseURL: nil)
+
     window.center()
+    window.setFrameAutosaveName("TorrStreamLite")
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
     startServer()
+  }
+
+  func makeMenu() -> NSMenu {
+    let menu = NSMenu()
+    func add(_ title: String, _ items: [NSMenuItem]) -> NSMenu {
+      let submenu = NSMenu(title: title)
+      items.forEach(submenu.addItem)
+      let root = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+      root.submenu = submenu
+      menu.addItem(root)
+      return submenu
+    }
+    func item(
+      _ title: String, _ action: Selector, _ key: String = "",
+      _ modifiers: NSEvent.ModifierFlags = .command
+    ) -> NSMenuItem {
+      let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+      item.keyEquivalentModifierMask = modifiers
+      return item
+    }
+    _ = add(
+      "TorrStream Lite",
+      [
+        item("About TorrStream Lite", #selector(showAbout)), .separator(),
+        item("Settings…", #selector(openSettings), ","), .separator(),
+        item("Hide TorrStream Lite", #selector(NSApplication.hide(_:)), "h"),
+        item(
+          "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h",
+          [.command, .option]),
+        item("Show All", #selector(NSApplication.unhideAllApplications(_:))), .separator(),
+        item("Quit TorrStream Lite", #selector(NSApplication.terminate(_:)), "q"),
+      ])
+    _ = add(
+      "File",
+      [
+        item("Open Torrent File…", #selector(openTorrentFile), "o"), .separator(),
+        item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
+      ])
+    _ = add(
+      "Edit",
+      [
+        item("Undo", Selector(("undo:")), "z"),
+        item("Redo", Selector(("redo:")), "z", [.command, .shift]), .separator(),
+        item("Cut", #selector(NSText.cut(_:)), "x"),
+        item("Copy", #selector(NSText.copy(_:)), "c"),
+        item("Paste", #selector(NSText.paste(_:)), "v"),
+        item("Select All", #selector(NSText.selectAll(_:)), "a"),
+      ])
+    NSApp.windowsMenu = add(
+      "Window",
+      [
+        item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+        item("Zoom", #selector(NSWindow.performZoom(_:))), .separator(),
+        item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:))),
+      ])
+    return menu
+  }
+
+  func applyAppearance(_ theme: String) {
+    NSApp.appearance =
+      theme == "light"
+      ? NSAppearance(named: .aqua) : theme == "dark" ? NSAppearance(named: .darkAqua) : nil
   }
 
   func startServer() {
@@ -110,8 +209,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     alert.informativeText = message
     alert.runModal()
   }
+
+  @objc func showAbout() {
+    let credits = NSAttributedString(
+      string: "Inspired by TorrServer. Uses librqbit under the Apache-2.0 license.",
+      attributes: [
+        .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+        .foregroundColor: NSColor.secondaryLabelColor,
+      ])
+    NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+  }
+
   @objc func openSettings() {
     web.evaluateJavaScript("window.torrstreamOpenSettings?.()", completionHandler: nil)
+  }
+
+  /// File → Open Torrent File… (⌘O). The page adds it, so progress and errors show there.
+  @objc func openTorrentFile() {
+    guard serverURL != nil else { return }
+    let panel = NSOpenPanel()
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    if let torrent = UTType(filenameExtension: "torrent") { panel.allowedContentTypes = [torrent] }
+    panel.beginSheetModal(for: window) { response in
+      guard response == .OK, let file = panel.url else { return }
+      guard let data = try? Data(contentsOf: file), data.count <= 2 * 1024 * 1024 else {
+        self.showError("Choose a .torrent file of at most 2 MiB.")
+        return
+      }
+      self.web.evaluateJavaScript(
+        "window.torrstreamAddTorrent?.(\"\(data.base64EncodedString())\")", completionHandler: nil)
+    }
   }
 
   func openProjectLink(_ raw: String) {
@@ -143,6 +271,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       {
         UserDefaults.standard.set(enabled, forKey: "tvAccessEnabled")
         UserDefaults.standard.set(port, forKey: "tvAccessPort")
+      }
+    case "setTheme":
+      if let theme = body["theme"] as? String, ["system", "light", "dark"].contains(theme) {
+        UserDefaults.standard.set(theme, forKey: "appearance")
+        applyAppearance(theme)
       }
     case "copy":
       if let text = body["text"] as? String, text.count <= 8192 {

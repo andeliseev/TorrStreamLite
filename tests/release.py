@@ -47,6 +47,25 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(plist['CFBundleShortVersionString'], '0.3.1')
             self.assertEqual(plist['CFBundleVersion'], '0.3.1')
 
+    def test_changelog_moves_unreleased_notes_once(self):
+        text = ('# Changelog\n\nIntro.\n\n## Unreleased\n\n- Added a thing.\n- Fixed a thing.\n\n'
+                '## 0.2.2 (2026-11-08)\n\n- Older.\n')
+        updated, notes = release.release_notes(text, '0.3.0', '2026-11-10')
+        self.assertEqual(notes, '- Added a thing.\n- Fixed a thing.')
+        self.assertIn('## Unreleased\n\n## 0.3.0 (2026-11-10)\n\n- Added a thing.', updated)
+        self.assertIn('## 0.2.2 (2026-11-08)\n\n- Older.', updated)
+        # A retried release reuses its section and changes nothing.
+        self.assertEqual(release.release_notes(updated, '0.3.0', '2026-11-11'), (updated, notes))
+        # The next release starts from the empty Unreleased section.
+        self.assertEqual(release.release_notes(updated, '0.3.1', '2026-11-12')[1], '')
+        with self.assertRaises(ValueError):
+            release.release_notes('# Changelog\n', '0.3.0', '2026-11-10')
+        with self.assertRaises(ValueError):
+            release.release_notes(text, 'v0.3.0', '2026-11-10')
+
+    def test_repository_changelog_has_unreleased_section(self):
+        self.assertIn('\n## Unreleased\n', (ROOT / 'CHANGELOG.md').read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

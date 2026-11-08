@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     io::SeekFrom,
+    net::IpAddr,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -113,7 +114,13 @@ fn link_matches(link: &str, hash: &str) -> bool {
             .is_some_and(|id| id.as_string() == hash)
 }
 
-pub fn router(state: Arc<AppState>) -> Router {
+/// `lan` is true for listeners that face the home network: TV access, or `--listen`
+/// on a non-loopback address. Only they accept the opaque origin of TV apps.
+pub fn router(state: Arc<AppState>, lan: bool) -> Router {
+    let guard = Guard {
+        state: state.clone(),
+        lan,
+    };
     Router::new()
         .route(
             "/",
@@ -188,11 +195,32 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/stream", get(compat_stream))
         .route("/stream/{name}", get(compat_stream))
         .layer(DefaultBodyLimit::max(MAX_METADATA))
-        .layer(middleware::from_fn_with_state(state.clone(), origin_guard))
+        .layer(middleware::from_fn_with_state(guard, request_guard))
         .with_state(state)
 }
 
-async fn origin_guard(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+#[derive(Clone)]
+struct Guard {
+    state: Arc<AppState>,
+    lan: bool,
+}
+
+async fn request_guard(State(guard): State<Guard>, req: Request, next: Next) -> Response {
+    let config = &guard.state.config;
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    // Clients without a Host header aren't browsers, so they can't be a rebound page.
+    if !host.is_empty() && !host_allowed(&host, &config.allow_host) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Unknown host name. Use the server's IP address, or start it with --allow-host <name>",
+        )
+            .into_response();
+    }
     let private_network = req
         .headers()
         .get("access-control-request-private-network")
@@ -202,15 +230,16 @@ async fn origin_guard(State(state): State<Arc<AppState>>, req: Request, next: Ne
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    if let Some(origin) = &origin {
-        let host = req
-            .headers()
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !origin_allowed(origin, host, req.uri().path(), &state.config.allow_origin) {
-            return (StatusCode::FORBIDDEN, "Browser origin is not allowed").into_response();
-        }
+    if let Some(origin) = &origin
+        && !origin_allowed(
+            origin,
+            &host,
+            req.uri().path(),
+            &config.allow_origin,
+            guard.lan,
+        )
+    {
+        return (StatusCode::FORBIDDEN, "Browser origin is not allowed").into_response();
     }
     let mut response = if req.method() == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
@@ -252,25 +281,56 @@ async fn origin_guard(State(state): State<Arc<AppState>>, req: Request, next: Ne
     response
 }
 
-fn origin_allowed(origin: &str, host: &str, path: &str, configured: &[String]) -> bool {
+fn origin_allowed(origin: &str, host: &str, path: &str, configured: &[String], lan: bool) -> bool {
     if origin == format!("http://{host}") || configured.iter().any(|item| item == origin) {
         return true;
     }
-    // Packaged TV widgets have the opaque "null" origin. These defaults apply
-    // only to the compatibility API, never to local network controls or /api/*.
+    // Lampa's defaults apply only to the compatibility API, never to network
+    // controls or /api/*. Packaged TV apps have the opaque "null" origin, but so
+    // does any web page's sandboxed frame. It is accepted only on listeners that
+    // face the home network, where the TV is, never on the Mac's loopback server.
     let compat = matches!(
         path,
         "/" | "/echo" | "/settings" | "/torrents" | "/cache" | "/viewed" | "/stream"
     ) || path.starts_with("/stream/");
     compat
-        && matches!(
-            origin,
-            "null"
-                | "http://lampa.mx"
-                | "https://lampa.mx"
-                | "http://lampa.app"
-                | "https://lampa.app"
-        )
+        && match origin {
+            "null" => lan,
+            "http://lampa.mx" | "https://lampa.mx" | "http://lampa.app" | "https://lampa.app" => {
+                true
+            }
+            _ => false,
+        }
+}
+
+/// A page that rebinds its own domain to this server still sends that domain as
+/// the Host. Only IP addresses, localhost, mDNS `.local` names and names passed
+/// with `--allow-host` are accepted; none of these can be rebound from outside.
+fn host_allowed(host: &str, allowed: &[String]) -> bool {
+    let name = host_name(host);
+    let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
+    !name.is_empty()
+        && (name.parse::<IpAddr>().is_ok()
+            || name == "localhost"
+            || name.ends_with(".localhost")
+            || name.ends_with(".local")
+            || allowed.iter().any(|item| item.eq_ignore_ascii_case(&name)))
+}
+
+/// The name in a Host header: `[::1]:8090` → `::1`, `mac.local:8090` → `mac.local`.
+fn host_name(host: &str) -> &str {
+    match host.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or("", |(ip, _)| ip),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    }
+}
+
+/// Browsers send fetch metadata; players and the native code of TV apps don't.
+/// Anything but a same-origin request or one the user typed counts as cross-site.
+fn cross_site(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| !matches!(value.as_bytes(), b"same-origin" | b"none"))
 }
 
 fn active_json(a: &Active) -> Value {
@@ -898,6 +958,14 @@ async fn compat_stream(
         link_matches(link, &h)
     });
     if !matches {
+        // An <img> or <video> tag on another site sends no Origin header. Loading a
+        // stream URL that way must not make this computer join a new swarm.
+        if cross_site(&headers) {
+            return Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "Add the torrent first with POST /torrents; a stream URL loaded from another site can't add one".into(),
+            ));
+        }
         add(
             &state,
             AddRequest {
@@ -944,4 +1012,147 @@ async fn compat_stream(
         return Ok(Json(active_json(&active)).into_response());
     }
     stream_file(active, index, method, headers).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NONE: [String; 0] = [];
+
+    #[test]
+    fn null_origin_only_on_home_network_listeners() {
+        assert!(!origin_allowed(
+            "null",
+            "127.0.0.1:8090",
+            "/torrents",
+            &NONE,
+            false
+        ));
+        assert!(!origin_allowed(
+            "null",
+            "127.0.0.1:8090",
+            "/stream",
+            &NONE,
+            false
+        ));
+        for path in [
+            "/",
+            "/echo",
+            "/settings",
+            "/torrents",
+            "/cache",
+            "/viewed",
+            "/stream",
+            "/stream/a.mkv",
+        ] {
+            assert!(
+                origin_allowed("null", "192.168.1.35:8090", path, &NONE, true),
+                "{path}"
+            );
+        }
+        for path in [
+            "/api/torrents",
+            "/api/network",
+            "/api/status",
+            "/licenses/app",
+        ] {
+            assert!(
+                !origin_allowed("null", "192.168.1.35:8090", path, &NONE, true),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn lampa_web_origins_reach_only_the_compatibility_api() {
+        for origin in [
+            "http://lampa.mx",
+            "https://lampa.mx",
+            "http://lampa.app",
+            "https://lampa.app",
+        ] {
+            assert!(origin_allowed(
+                origin,
+                "127.0.0.1:8090",
+                "/settings",
+                &NONE,
+                false
+            ));
+            assert!(!origin_allowed(
+                origin,
+                "127.0.0.1:8090",
+                "/api/network",
+                &NONE,
+                true
+            ));
+        }
+        for origin in ["https://lampa.mx.example", "https://example.com", "file://"] {
+            assert!(
+                !origin_allowed(origin, "192.168.1.35:8090", "/settings", &NONE, true),
+                "{origin}"
+            );
+        }
+        assert!(origin_allowed(
+            "http://127.0.0.1:8090",
+            "127.0.0.1:8090",
+            "/api/network",
+            &NONE,
+            false
+        ));
+        let configured = ["https://player.example".to_owned()];
+        assert!(origin_allowed(
+            "https://player.example",
+            "127.0.0.1:8090",
+            "/api/status",
+            &configured,
+            false
+        ));
+    }
+
+    #[test]
+    fn refuses_host_names_a_rebound_page_would_send() {
+        for host in [
+            "127.0.0.1:8090",
+            "[::1]:8090",
+            "192.168.1.35:8090",
+            "0.0.0.0:8090",
+            "localhost:8090",
+            "LOCALHOST",
+            "app.localhost:8090",
+            "macbook.local:8090",
+            "MacBook.local.:8090",
+        ] {
+            assert!(host_allowed(host, &NONE), "{host}");
+        }
+        for host in [
+            "",
+            "evil.example:8090",
+            "127.0.0.1.evil.example:8090",
+            "localhost.evil.example",
+            "local:8090",
+            "[::1:8090",
+            "my.keenetic.net:8090",
+        ] {
+            assert!(!host_allowed(host, &NONE), "{host}");
+        }
+        let allowed = ["my.keenetic.net".to_owned()];
+        assert!(host_allowed("My.Keenetic.Net:8090", &allowed));
+        assert!(!host_allowed("keenetic.net", &allowed));
+    }
+
+    #[test]
+    fn only_same_origin_or_typed_requests_count_as_same_site() {
+        let mut headers = HeaderMap::new();
+        assert!(!cross_site(&headers), "players send no fetch metadata");
+        for (value, expected) in [
+            ("same-origin", false),
+            ("none", false),
+            ("same-site", true),
+            ("cross-site", true),
+        ] {
+            headers.insert("sec-fetch-site", value.parse().unwrap());
+            assert_eq!(cross_site(&headers), expected, "{value}");
+        }
+    }
 }

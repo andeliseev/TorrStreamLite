@@ -30,8 +30,13 @@ pub struct Config {
     /// Allow a browser client at this origin. May be repeated.
     #[arg(long)]
     allow_origin: Vec<String>,
-    /// Port used when TV access is enabled from the control page.
-    #[arg(long, default_value_t = 8091, value_parser = clap::value_parser!(u16).range(1024..))]
+    /// Accept requests addressed to this host name. IP addresses, localhost and
+    /// .local names always work. May be repeated.
+    #[arg(long)]
+    allow_host: Vec<String>,
+    /// Port for home network access (TV access), switched on from the control page.
+    /// 8090 is the port TorrServer apps expect.
+    #[arg(long, default_value_t = 8090, value_parser = clap::value_parser!(u16).range(1024..))]
     tv_port: u16,
 }
 
@@ -112,9 +117,11 @@ async fn run(config: Config) -> Result<()> {
     let idle = tokio::spawn(server::idle_watchdog(Arc::downgrade(&state)));
     let shutdown = tokio_util::sync::CancellationToken::new();
     let network_watch = tokio::spawn(network::watch(Arc::downgrade(&state), shutdown.clone()));
+    // A listener on a LAN address (the router build) serves TVs directly.
+    let lan = !config.listen.ip().is_loopback();
     axum::serve(
         listener,
-        server::router(state.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+        server::router(state.clone(), lan).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
         #[cfg(unix)]

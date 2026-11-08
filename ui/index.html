@@ -8,148 +8,261 @@
   </head>
   <body>
     <div id="app">
-      <header class="toolbar">
-        <h1>
-          TorrStream
-          <span>Lite</span>
-        </h1>
-        <div class="network" id="tv-panel">
-          <div id="tv-addresses" aria-label="Server address">
-            <span class="muted">Checking network…</span>
-          </div>
-          <label class="switch" id="tv-switch">
-            <input type="checkbox" id="tv-enabled" disabled />
-            TV access
-          </label>
+      <aside id="sidebar">
+        <div class="brand">
+          <!-- The app icon (app-icon.svg): a play mark with motion lines on the green tile. -->
+          <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+            <rect class="tile" x="2" y="2" width="20" height="20" rx="5" />
+            <g class="mark">
+              <path class="play" d="M11.9 8.2v7.6l6-3.8z" />
+              <path d="M7.2 9.4h2.2M6.1 12h3.3M7.2 14.6h2.2" />
+            </g>
+          </svg>
+          <span>
+            TorrStream
+            <span class="lite">Lite</span>
+          </span>
         </div>
+        <div
+          id="state"
+          class="state"
+          data-kind="idle"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="dot" aria-hidden="true"></span>
+          <span id="state-text">Connecting…</span>
+        </div>
+        <div class="stats">
+          <button
+            id="peers-button"
+            class="stat stat-link"
+            type="button"
+            aria-haspopup="dialog"
+          >
+            <span class="stat-label">Download</span>
+            <span class="stat-value" id="speed">
+              0.0
+              <small>Mbps</small>
+            </span>
+            <span class="stat-note">
+              <span id="peers">No torrent</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m9 6 6 6-6 6" />
+              </svg>
+            </span>
+          </button>
+          <div class="stat">
+            <span class="stat-label">Cache</span>
+            <span class="stat-value" id="cache">
+              0.0
+              <small>/ 96 MiB</small>
+            </span>
+            <div class="meter" aria-hidden="true"><div id="meter"></div></div>
+          </div>
+          <div class="stat">
+            <span class="stat-label">
+              <span class="wide-only">Server</span>
+              memory
+            </span>
+            <span class="stat-value" id="rss">
+              —
+              <small>MiB</small>
+            </span>
+          </div>
+        </div>
+        <section class="tv" aria-labelledby="tv-title">
+          <div class="side-title" id="tv-title">Home network</div>
+          <label class="switch-row" id="tv-switch">
+            <span>Allow other devices</span>
+            <span class="switch">
+              <input type="checkbox" role="switch" id="tv-enabled" disabled />
+              <span class="knob" aria-hidden="true"></span>
+            </span>
+          </label>
+          <div id="tv-addresses" class="tv-addresses"></div>
+          <p id="tv-hint" class="tv-hint">Checking your network…</p>
+          <p id="tv-error" class="tv-error" role="alert" hidden></p>
+        </section>
+        <div class="spacer"></div>
         <button
           id="settings-button"
-          class="icon-button"
-          aria-label="Settings"
+          class="side-btn"
+          type="button"
           aria-haspopup="dialog"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 6h8m4 0h4M4 12h2m4 0h10M4 18h10m4 0h2" />
-            <circle cx="14" cy="6" r="2" />
-            <circle cx="8" cy="12" r="2" />
-            <circle cx="16" cy="18" r="2" />
-          </svg>
-        </button>
-      </header>
-      <main>
-        <p id="network-error" class="error" role="alert" hidden></p>
-        <section class="metrics" aria-label="Server statistics">
-          <div class="metric">
-            <small>Server memory</small>
-            <div class="number" id="rss">
-              —
-              <span>MiB</span>
-            </div>
-          </div>
-          <div class="metric">
-            <small>Cache reserved</small>
-            <div class="number" id="cache">
-              —
-              <span>/ 96 MiB</span>
-            </div>
-            <div class="meter" aria-hidden="true"><div id="meter"></div></div>
-          </div>
-          <button
-            class="metric speed-button"
-            id="peers-button"
-            aria-label="Download speed. Open peer details"
-            aria-haspopup="dialog"
-            aria-expanded="false"
-          >
-            <small>
-              Download
-              <span aria-hidden="true">›</span>
-            </small>
-            <span class="number" id="speed">
-              —
-              <span>Mbps</span>
-            </span>
-            <small id="peers">No active peers</small>
-          </button>
-        </section>
-        <section aria-label="Add a torrent">
-          <form id="add" class="row">
-            <input
-              id="link"
-              aria-label="Magnet or torrent URL"
-              placeholder="Magnet link or .torrent URL"
-              required
+            <circle cx="12" cy="12" r="3" />
+            <path
+              d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"
             />
-            <button id="add-button" class="primary">Add torrent</button>
-            <button type="button" id="file-button">Open .torrent</button>
-            <input id="upload" type="file" accept=".torrent" hidden />
-          </form>
-          <p id="hint" class="muted" role="status" hidden></p>
-          <p id="error" class="error" role="alert" hidden></p>
-        </section>
-        <section class="files-panel" aria-label="Torrent files">
-          <div class="section-heading">
-            <div>
-              <h2 id="torrent-name">Ready to stream</h2>
-              <small id="file-count"></small>
+          </svg>
+          <span class="label">Settings</span>
+        </button>
+      </aside>
+
+      <main id="main">
+        <header class="pane-head">
+          <div class="pane-title">
+            <h1 id="torrent-name">Add a torrent</h1>
+            <p id="torrent-meta">Paste a magnet link or open a .torrent file</p>
+          </div>
+          <button id="stop" class="danger" type="button" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+            Stop &amp; release RAM
+          </button>
+        </header>
+        <div id="banner" class="banner" role="alert" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7.5v5M12 16h.01" />
+          </svg>
+          <span id="banner-text"></span>
+          <button
+            id="banner-close"
+            class="icon-btn"
+            type="button"
+            aria-label="Dismiss"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+        <section id="add-view" class="add-view" aria-label="Add a torrent">
+          <form id="add" class="drop-card">
+            <svg class="drop-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 4v10m0 0-4-4m4 4 4-4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"
+              />
+            </svg>
+            <h2>Stream a torrent</h2>
+            <p>
+              Paste a magnet link or a .torrent URL, or drop a .torrent file
+              anywhere in this window.
+            </p>
+            <div class="add-row">
+              <input
+                id="link"
+                aria-label="Magnet link or .torrent URL"
+                placeholder="magnet:?xt=urn:btih:…"
+                autocomplete="off"
+                spellcheck="false"
+                required
+              />
+              <button id="add-button" class="primary">Add</button>
             </div>
-            <button id="stop" class="stop" hidden>
-              Stop &amp; release RAM
+            <button type="button" id="file-button" class="link-btn">
+              Choose a .torrent file…
             </button>
-          </div>
-          <div id="files">
-            <div class="empty">Add a magnet link or open a .torrent file.</div>
-          </div>
+            <input
+              id="upload"
+              type="file"
+              accept=".torrent,application/x-bittorrent"
+              hidden
+            />
+            <p id="progress" class="progress" role="status" hidden>
+              <span class="spinner" aria-hidden="true"></span>
+              Finding the torrent and its peers. This can take up to a minute.
+            </p>
+          </form>
         </section>
-        <footer>
-          <span class="status-dot" aria-hidden="true"></span>
-          <span id="footer-status">Connecting…</span>
-        </footer>
+        <section id="files-view" class="files-view" aria-label="Files" hidden>
+          <ul id="files" class="files"></ul>
+        </section>
       </main>
     </div>
+
+    <div id="drop-overlay" class="drop-overlay" hidden>
+      <p>Drop the .torrent file to add it</p>
+    </div>
+
     <div class="overlay" id="overlay" hidden>
       <section
-        class="dialog"
+        class="card"
         id="settings-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
         hidden
       >
-        <div class="dialog-heading">
-          <h2 id="settings-title">Settings</h2>
-          <button
-            class="icon-button"
-            data-close-dialog
-            aria-label="Close settings"
-          >
-            ×
-          </button>
-        </div>
+        <button
+          class="icon-btn close"
+          type="button"
+          data-close-dialog
+          aria-label="Close"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+        <h2 id="settings-title">Settings</h2>
         <section id="connection-options">
-          <h3>Connection</h3>
-          <form class="port-row" id="port-form">
-            <label for="tv-port">TV port</label>
+          <h3>Home network</h3>
+          <p class="hint">
+            While other devices are allowed, anything on your home network can
+            play and stop torrents without a password. 8090 is the port
+            TorrServer apps expect.
+          </p>
+          <form class="form-row" id="port-form">
+            <label for="tv-port">Port</label>
             <input
               type="number"
               id="tv-port"
               min="1024"
               max="65535"
               required
-              value="8091"
+              value="8090"
             />
             <button id="tv-apply">Apply</button>
           </form>
         </section>
-        <p id="remote-settings" class="muted" hidden>
-          Connection options are controlled on the server.
+        <p id="remote-settings" class="hint" hidden>
+          Home network settings can only be changed on the computer that runs
+          TorrStream Lite.
         </p>
         <p id="settings-error" class="error" role="alert" hidden></p>
+        <section>
+          <h3>Appearance</h3>
+          <div
+            id="theme"
+            class="segmented"
+            role="radiogroup"
+            aria-label="Appearance"
+          >
+            <button
+              type="button"
+              role="radio"
+              data-theme="system"
+              aria-checked="true"
+            >
+              System
+            </button>
+            <button
+              type="button"
+              role="radio"
+              data-theme="light"
+              aria-checked="false"
+            >
+              Light
+            </button>
+            <button
+              type="button"
+              role="radio"
+              data-theme="dark"
+              aria-checked="false"
+            >
+              Dark
+            </button>
+          </div>
+        </section>
         <details class="diagnostics">
-          <summary>Cache diagnostics</summary>
+          <summary>Cache details</summary>
           <dl>
             <div>
-              <dt>Occupied piece slots</dt>
+              <dt>Pieces in RAM</dt>
               <dd id="cache-pieces">0</dd>
             </div>
             <div>
@@ -162,12 +275,12 @@
             </div>
           </dl>
         </details>
-        <section class="about">
-          <h3>
-            TorrStream Lite
-            <span id="app-version">—</span>
-          </h3>
-          <div class="about-links">
+        <section id="about">
+          <p>
+            <strong>TorrStream Lite</strong>
+            <span id="app-version"></span>
+          </p>
+          <p>
             <a
               href="https://github.com/andeliseev/TorrStreamLite"
               target="_blank"
@@ -176,7 +289,7 @@
             >
               GitHub
             </a>
-            <span>·</span>
+            ·
             <a
               href="https://github.com/andeliseev/TorrStreamLite/releases"
               target="_blank"
@@ -185,11 +298,13 @@
             >
               Releases
             </a>
-            <span>·</span>
-            <button class="link-button" data-license="app">MIT license</button>
-          </div>
-          <p>© 2026 Andrei Eliseev</p>
-          <p class="credits">
+            ·
+            <button type="button" class="link-btn" data-license="app">
+              MIT license
+            </button>
+          </p>
+          <!-- No trailing punctuation: the formatter puts a space before it. -->
+          <p>
             Inspired by
             <a
               href="https://github.com/YouROK/TorrServer"
@@ -199,8 +314,8 @@
             >
               TorrServer
             </a>
-            .
-            <br />
+          </p>
+          <p>
             Uses
             <a
               href="https://github.com/ikatson/rqbit"
@@ -210,85 +325,89 @@
             >
               librqbit
             </a>
-            under
-            <button class="link-button" data-license="third-party">
-              Apache-2.0
+            under the
+            <button type="button" class="link-btn" data-license="third-party">
+              Apache-2.0 license
             </button>
-            .
           </p>
+          <p>© 2026 Andrei Eliseev</p>
         </section>
       </section>
+
       <section
-        class="dialog peer-dialog"
+        class="card"
         id="peers-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="peers-title"
         hidden
       >
-        <div class="dialog-heading">
-          <div>
-            <h2 id="peers-title">Download details</h2>
-            <small id="peer-summary">Loading peers…</small>
-          </div>
-          <button
-            class="icon-button"
-            data-close-dialog
-            aria-label="Close peer details"
-          >
-            ×
-          </button>
-        </div>
-        <div class="peer-total">
-          <span class="number" id="peer-total">
-            —
-            <span>Mbps</span>
-          </span>
-          <small>Current download</small>
-        </div>
+        <button
+          class="icon-btn close"
+          type="button"
+          data-close-dialog
+          aria-label="Close"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+        <h2 id="peers-title">Download</h2>
+        <p class="hint" id="peer-summary">Loading peers…</p>
+        <p class="big" id="peer-total">
+          —
+          <small>Mbps</small>
+        </p>
         <p id="peer-error" class="error" role="alert" hidden></p>
         <div class="peer-scroll">
-          <table id="peer-table" hidden>
+          <table id="peer-table" class="peers" hidden>
             <thead>
               <tr>
-                <th>Peer / client</th>
+                <th>Peer</th>
                 <th>Speed</th>
                 <th>Received</th>
               </tr>
             </thead>
             <tbody id="peer-rows"></tbody>
           </table>
-          <p id="peer-empty" class="empty">Loading peers…</p>
+          <p id="peer-empty" class="empty-note">Loading peers…</p>
         </div>
       </section>
+
       <section
-        class="dialog license-dialog"
+        class="card wide"
         id="license-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="license-title"
         hidden
       >
-        <div class="dialog-heading">
-          <button
-            class="icon-button"
-            id="license-back"
-            aria-label="Back to Settings"
-          >
-            ‹
-          </button>
-          <h2 id="license-title">MIT license</h2>
-          <button
-            class="icon-button"
-            data-close-dialog
-            aria-label="Close license"
-          >
-            ×
-          </button>
-        </div>
+        <button
+          class="icon-btn back"
+          type="button"
+          id="license-back"
+          aria-label="Back to Settings"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m15 6-6 6 6 6" />
+          </svg>
+        </button>
+        <button
+          class="icon-btn close"
+          type="button"
+          data-close-dialog
+          aria-label="Close"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+        <h2 id="license-title">MIT license</h2>
         <pre id="license-text">Loading…</pre>
       </section>
     </div>
+
+    <div id="toast" class="toast" role="status" hidden></div>
     <script src="/peer-rates.js" defer></script>
     <script src="/app.js" defer></script>
   </body>

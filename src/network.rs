@@ -137,7 +137,7 @@ impl TvAccess {
                 Ok(listener) => {
                     let cancel = CancellationToken::new();
                     let shutdown = cancel.clone();
-                    let app = server::router(state.clone())
+                    let app = server::router(state.clone(), true)
                         .layer(middleware::from_fn_with_state(cancel.clone(), tv_response));
                     let task = tokio::spawn(async move {
                         if let Err(error) = axum::serve(

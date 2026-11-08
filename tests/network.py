@@ -68,6 +68,22 @@ with tempfile.TemporaryDirectory(prefix='torrstream-network-') as tmp:
         except urllib.error.HTTPError as e: assert e.code == 403
         else: raise AssertionError('Remote client changed LAN settings')
         mark('TV clients cannot change local network settings')
+        # Packaged TV apps such as Lampa on Samsung send Origin: null and form-labelled JSON.
+        tv_app = {'Origin': 'null', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
+        with request(lan, '/settings', json.dumps({'action': 'get'}).encode(), tv_app) as r:
+            assert r.headers['Access-Control-Allow-Origin'] == 'null'
+            assert json.load(r)['CacheSize'] == 6 * 1048576
+        with request(lan, '/torrents', json.dumps({'action': 'list'}).encode(), tv_app) as r:
+            assert json.load(r)[0]['hash'] == torrent['hash']
+        refused = [(base, '/settings', {'action': 'get'}, tv_app),
+                   (lan, '/api/torrents', {'link': 'invalid'}, tv_app),
+                   (lan, '/settings', {'action': 'get'}, {'Host': 'rebind.example:8090'}),
+                   (base, '/api/status', None, {'Host': 'rebind.example'})]
+        for url, path, body, headers in refused:
+            try: request(url, path, json.dumps(body).encode() if body else None, headers)
+            except urllib.error.HTTPError as e: assert e.code == 403, (url, path, e.code)
+            else: raise AssertionError(f'{url}{path} accepted {headers}')
+        mark('TV apps\' null origin works only on the TV listener; unknown host names are refused')
         for origin in (base, lan):
             with request(origin, '/api/stream/2', headers={'Range': 'bytes=11-1048586'}) as r:
                 assert r.status == 206

@@ -1,0 +1,185 @@
+# Development
+
+Run the commands below from the repository root.
+
+## Requirements
+
+- Rust: tested with 1.99.1; `Cargo.toml` asks for 1.94 or later. `scripts/cargo.sh` uses a project-local toolchain under `.build/` when there is one, and the system's otherwise. Dependency versions are pinned in `Cargo.lock`.
+- macOS with the Xcode Command Line Tools, for the Mac app. It's built for the Mac's own architecture and runs on macOS 12 or later.
+- Python 3.11 or later, for the tests and the release helper. Node.js, only for `tests/peer-rates.cjs`.
+- FFmpeg, only for the optional 4K video test.
+
+## Build the Mac app
+
+```sh
+sh scripts/build-macos.sh
+```
+
+Open **`dist/TorrStream Lite.app`**. Quit and reopen the app after rebuilding, to load the new server. The files in `ui/` are compiled into the server, so rebuild after editing them too. The app is ad-hoc signed, not notarized. The window, the player and the video decoder use memory of their own, apart from the server memory the app shows.
+
+Packaging a DMG (`sh scripts/package-macos.sh`, into `release-assets/`) and the Keenetic build ([router.md](router.md)) are separate steps.
+
+To run only the server, for example to work on the control page in a browser:
+
+```sh
+sh scripts/cargo.sh run -- --listen 127.0.0.1:8090
+```
+
+Then open <http://127.0.0.1:8090>.
+
+## Tests
+
+Before you push:
+
+```sh
+sh scripts/cargo.sh fmt --all
+sh scripts/cargo.sh clippy --locked --all-targets -- -D warnings
+sh scripts/cargo.sh test --locked
+python3 tests/release.py
+node tests/peer-rates.cjs
+```
+
+The streaming tests start a real server against a local BitTorrent peer that serves generated data. They use `target/release/torrstream-lite`, which `scripts/build-macos.sh` builds; after a debug build (`sh scripts/cargo.sh build --locked`), add `--binary target/debug/torrstream-lite`.
+
+```sh
+python3 tests/e2e.py --cache-mib 6 --size-mib 64
+python3 tests/e2e.py --cache-mib 6 --size-mib 64 --corrupt-first --report test-results/corruption-recovery.json
+python3 tests/e2e.py --cache-mib 96 --size-mib 256 --rate-mbps 80 --report test-results/router-profile.json
+python3 tests/lampa.py
+python3 tests/network.py
+```
+
+To try a real 4K video, generate one with FFmpeg and offer it to the app through a local peer:
+
+```sh
+ffmpeg -f lavfi -i 'testsrc2=size=3840x2160:rate=24' -t 12 -c:v libx264 -preset ultrafast -crf 22 -pix_fmt yuv420p -movflags +faststart -an /tmp/torrstream-lite-4k-test.mp4
+python3 tests/serve_fixture.py --video /tmp/torrstream-lite-4k-test.mp4
+```
+
+Paste the printed torrent URL into the app. The test peer reads the video from disk; **TorrStream Lite itself still keeps everything it receives in RAM**.
+
+### What the tests cover
+
+The local peer speaks the real BitTorrent protocol and never contacts public swarms. The engine's DHT is turned off in these tests.
+
+- Whole files larger than the cache, with every byte checked
+- Backward and forward seeks, suffix ranges, overlapping head and tail requests, and pieces that span files
+- Magnet metadata exchange, rejecting and recovering from a corrupted piece, and bounded allocation
+- One torrent at a time, invalid ranges, and HEAD requests that download nothing
+- Stop during a slow HTTP response, cache teardown, and no files written by the server
+- TV access: a reachable LAN listener, range streaming and LAN playlist links, refusing settings changes from the network, the opaque `null` origin of TV apps (accepted there, refused on the loopback server), stopping TV streams without stopping Mac playback, invalid ports and port conflicts
+- Lampa's sequence: ping, form-labelled JSON from Lampa's web origin, adding by torrent URL, file selection, delayed preload progress, cache statistics, playback and seeking, watched positions and teardown; and that Lampa can't change TV access and other browser origins are refused
+- Requests addressed to unknown host names (DNS rebinding) are refused, and a cross-site stream URL can't add a torrent
+- Decoding a generated 3840×2160 H.264 clip through the Mac server: all 288 frame hashes and a seek match the original
+
+Machine-readable results go to `test-results/` (not committed). The native window, a physical TV and the router still need manual checks.
+
+### Measurements
+
+On an Apple Silicon Mac, November 8, 2026, with the local peer:
+
+| Test | Result |
+| --- | --- |
+| 256 MiB at 80 Mbps, 96 MiB cache | 110.81 MiB peak server memory |
+| The same, after Stop | 14.59 MiB; cache released |
+| 32 MiB with a 6 MiB cache | 19.02 MiB peak; never over the cache budget |
+| Generated 4K clip through the bundled server | 288 matching decoded frames; the seek matched |
+| Control page: add a torrent, then Stop | Server memory from 98 to 16 MiB |
+
+These aren't router benchmarks or a guarantee for Internet swarms, and there's no measured comparison with TorrServer yet.
+
+## Project layout
+
+| Folder | Contents |
+| --- | --- |
+| `src/` | Rust server: HTTP API, RAM cache, TV access |
+| `ui/` | Control page; compiled into the server |
+| `macos/` | Native Mac window and `Info.plist` |
+| `scripts/` | Mac build and DMG, Keenetic build, Rust toolchain helper, release helper, app icon |
+| `tests/` | Local torrent peer, streaming, memory, network, Lampa and release tests |
+| `vendor/` | The pinned librqbit engine with local changes ([UPSTREAM.md](../vendor/UPSTREAM.md)) |
+| `docs/` | These notes |
+| `.github/workflows/` | The Release workflow |
+
+`.build/` and `target/` hold the local toolchain and build caches. `dist/`, `release-assets/` and `test-results/` hold generated files. All of them are ignored by Git.
+
+## App icon
+
+The icon is drawn in [`app-icon.svg`](../app-icon.svg), built like Unified Mail's: a white play mark with three motion lines on a green tile with a wide rim. The same drawing is the sidebar logo in `ui/index.html`; change both together. To regenerate `macos/AppIcon.icns` (needs macOS 14 or later, which reads SVG):
+
+```sh
+xcrun swift scripts/make-icon.swift
+```
+
+## Code formatting
+
+Rust uses `cargo fmt`, Swift uses Xcode's `swift-format`, and the control page uses Prettier 3.6.2. Prettier is only a formatter: nothing in the build needs Node.
+
+```sh
+sh scripts/cargo.sh fmt --all
+xcrun swift-format format --in-place macos/App.swift
+```
+
+## Releases (GitHub Actions)
+
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) tests, builds and publishes a release in one click. It needs no secrets: it uses the repository's built-in `GITHUB_TOKEN`. Repository rules must let GitHub Actions push to `main`, for the version commit.
+
+**To release:** **Actions → Release → Run workflow**, choose what to raise and what to build, and run it:
+
+| Choice | From 0.2.2 | Use for |
+| --- | --- | --- |
+| `patch` (default) | 0.2.3 | Fixes |
+| `minor` | 0.3.0 | New features |
+| `major` | 1.0.0 | Big changes |
+
+Or type an exact version (e.g. `0.3.0`) in the second box; it wins over the choice. Versions are plain `X.Y.Z`.
+
+The third box picks the downloads: **macOS** (default), **macOS and Keenetic**, or **Keenetic**. The README's Download link points to the latest release, so after a one-platform release the other platform's file isn't there until a release includes it again. Older releases still have it.
+
+To see what a run would release:
+
+```sh
+python3 scripts/release.py next --bump patch
+```
+
+It prints the last release and the next version. The last release is the highest `vX.Y.Z` tag on GitHub (`git ls-remote --tags origin` lists them). The run is named "Release (patch, macOS)" or "Release (0.3.0, macOS)" in the Actions list, and its summary page names the version.
+
+The workflow then:
+
+1. **Tests:** formatting, Clippy, unit tests, the release helper and peer speed tests, then the streaming, Lampa and TV access tests against a local peer, on Linux. If anything fails, nothing is committed or built.
+2. Works out the version with `scripts/release.py next`. It stops if that isn't newer than the last release, or is lower than the version already in `Cargo.toml`.
+3. Sets it in `Cargo.toml`, `Cargo.lock` and `macos/Info.plist` (`scripts/release.py set`).
+4. Moves the **Unreleased** lines of [`CHANGELOG.md`](../CHANGELOG.md) under `## X.Y.Z (date)` (`scripts/release.py changelog`), leaving an empty Unreleased section for the next changes. With nothing under Unreleased, the run shows a warning and the release has no "What's new".
+5. Commits all that as "Release vX.Y.Z" to `main`. Run `git pull` afterwards, before you commit locally.
+6. Creates a draft release `vX.Y.Z` whose text starts with **What's new** (those changelog lines), replacing a draft left by a failed run.
+7. Builds the chosen platforms in parallel and uploads them to the draft, each with a `.sha256` file:
+   - **macOS:** builds the app on an Apple Silicon runner, verifies its signature, runs the Lampa test against the server inside the app, and packages `TorrStream-Lite-X.Y.Z-macos-arm64.dmg`.
+   - **Keenetic:** cross-compiles a static ARM64 Linux binary with `cargo-zigbuild`, checks that it's static ARM64, and packs `TorrStream-Lite-X.Y.Z-linux-arm64.tar.gz` with the licenses.
+8. Publishes the release only if every build succeeded. Only then does the `vX.Y.Z` tag exist.
+
+**If a run fails,** fix the cause and run it again with the same choice. The tag doesn't exist yet, so the same version comes out, and its draft is replaced. The changelog already has that version's section, so its notes are reused.
+
+**Before releasing,** check the Unreleased lines in `CHANGELOG.md`: they become the release notes as written. Don't set the version locally: the workflow does it.
+
+**Notes:**
+
+- There's no separate workflow for every push. The Release workflow runs the same tests before it builds anything, so run the [tests](#tests) locally before you push, and a broken `main` is caught at the latest when you release.
+- On a private repository, Actions minutes count against the account's monthly allowance, and macOS minutes count ten times. Each macOS release builds the app once. On a public repository the minutes are free.
+- The Mac app is ad-hoc signed and not notarized. The release notes explain **Open Anyway**.
+
+## Manual test checklist
+
+- [ ] First launch from the DMG on a Mac that never had the app: Gatekeeper's Open Anyway, the window opens, Idle, server memory around 15 MiB
+- [ ] Add a magnet link with reachable peers: the files appear within a minute
+- [ ] **Play**: VLC (or IINA) starts; seek forward and back; speed and cache update, and the status says Streaming
+- [ ] **Download**: peers appear with speeds; after closing the panel, `/api/peers` isn't requested any more
+- [ ] **Stop & release RAM**: server memory drops back near idle
+- [ ] Add a second torrent while one is loaded: a clear message to stop the first
+- [ ] Turn on **Allow other devices**: the address appears with port 8090; Lampa on the TV connects, lists the files, plays and seeks
+- [ ] Turn it off while the TV plays: the TV stream stops, Mac playback continues
+- [ ] Change the port in Settings, quit and reopen: the switch and the port are kept
+- [ ] Settings → Appearance: System, Light and Dark switch the page and the titlebar; the choice is kept after reopening
+- [ ] Drag the window by its top edge; double-click there to zoom. Resize it: the sidebar keeps its width and the file list takes the rest; quit and reopen: size and position are kept
+- [ ] ⌘O adds a .torrent file; so does dropping one on the window, and pasting a magnet link outside the text field
+- [ ] Menus: About shows the icon and version; ⌘W, ⌘M and ⌘H work
+- [ ] Quit while a magnet is still resolving: no `torrstream-lite` process is left (Activity Monitor)

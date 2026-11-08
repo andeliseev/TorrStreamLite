@@ -1,0 +1,8 @@
+# Same line endings on every checkout; the release helper edits these files as text.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.icns binary
+*.torrent binary
+# The vendored engine keeps upstream's bytes exactly (one test fixture uses CRLF).
+vendor/** -text

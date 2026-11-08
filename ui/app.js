@@ -1,7 +1,16 @@
+// Proposed control page. Same server API and native messages as ui/app.js;
+// only the layout, states and feedback differ.
 const $ = (id) => document.getElementById(id);
-let lastHash,
+const desktopApp = Boolean(window.torrstreamDesktop);
+document.documentElement.classList.toggle("desktop", desktopApp);
+
+let current = null,
+  lastHash,
   loading = false,
-  statusBusy = false;
+  resolving = false,
+  statusBusy = false,
+  playing = null,
+  dismissedError = "";
 let networkBusy = false,
   networkReadBusy = false,
   networkRevision = 0,
@@ -12,8 +21,29 @@ let dialog = null,
 let peerRun = 0,
   peerTimer = null,
   peerAbort = null,
-  licenseRun = 0;
+  licenseRun = 0,
+  toastTimer = null;
 const peerRates = new PeerRates();
+
+// Static, trusted icon markup. File names and server text always use textContent.
+const ICONS = {
+  play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></svg>',
+  video:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9.5h4M17 9.5h4M3 14.5h4M17 14.5h4"/></svg>',
+  audio:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>',
+  subtitles:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 12h3M13 12h4M7 15.5h6M15 15.5h2"/></svg>',
+  other:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
+};
+const KINDS = [
+  ["video", /\.(mkv|mp4|m4v|avi|mov|webm|ts|m2ts|wmv|mpg|mpeg)$/i],
+  ["audio", /\.(mp3|flac|m4a|aac|ogg|opus|wav)$/i],
+  ["subtitles", /\.(srt|ass|ssa|vtt|sub|idx)$/i],
+];
+const kindOf = (path) => KINDS.find(([, re]) => re.test(path))?.[0] || "other";
 
 function mib(n) {
   return (n / 1048576).toFixed(1);
@@ -24,12 +54,22 @@ function size(n) {
   if (n >= 1024) return (n / 1024).toFixed(1) + " KiB";
   return n + " B";
 }
+function mbps(bytes) {
+  return (((bytes || 0) * 8) / 1000000).toFixed(1);
+}
 function message(id, text) {
   $(id).textContent = text;
   $(id).hidden = !text;
 }
-function speedMarkup(bytes) {
-  return (((bytes || 0) * 8) / 1000000).toFixed(1) + " <span>Mbps</span>";
+function banner(text) {
+  message("banner-text", text);
+  $("banner").hidden = !text;
+}
+function toast(text) {
+  $("toast").textContent = text;
+  $("toast").hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => ($("toast").hidden = true), 2200);
 }
 async function api(
   path,
@@ -47,8 +87,17 @@ async function api(
       signal: controller.signal,
       cache: "no-store",
     });
-    const value = plain ? await response.text() : await response.json();
-    if (!response.ok) throw Error(value.error || response.statusText);
+    const text = await response.text();
+    let value = text;
+    if (!plain) {
+      try {
+        value = text ? JSON.parse(text) : null;
+      } catch {
+        // Plain-text errors (for example a refused browser origin) stay readable.
+        if (response.ok) throw Error("The server sent an unexpected reply.");
+      }
+    }
+    if (!response.ok) throw Error(value?.error || text || response.statusText);
     return value;
   } finally {
     clearTimeout(timer);
@@ -58,72 +107,151 @@ async function api(
 function desktop(value) {
   window.webkit?.messageHandlers?.desktop?.postMessage(value);
 }
-function busy(value) {
+
+// Adding and stopping
+function setLoading(value) {
   loading = value;
-  $("add-button").disabled = value;
-  $("file-button").disabled = value;
-  message("hint", value ? "Resolving torrent and finding peers…" : "");
+  showAddState();
+}
+function showAddState() {
+  const busy = loading || resolving;
+  $("link").disabled = busy;
+  $("add-button").disabled = busy;
+  $("file-button").disabled = busy;
+  $("progress").hidden = !busy;
+  if (!current) {
+    $("torrent-name").textContent = busy
+      ? "Adding a torrent…"
+      : "Add a torrent";
+    $("torrent-meta").textContent = busy
+      ? "Looking up the torrent"
+      : "Paste a magnet link or open a .torrent file";
+  }
 }
 async function add(options, path = "/api/torrents") {
-  busy(true);
-  message("error", "");
+  setLoading(true);
+  banner("");
   try {
     await api(path, { ...options, timeout: 100000 });
     $("link").value = "";
     await refresh();
   } catch (e) {
-    message("error", e.message);
+    banner(e.message);
   } finally {
-    busy(false);
+    setLoading(false);
   }
 }
-$("add").onsubmit = (event) => {
-  event.preventDefault();
+function addLink(link) {
   add({
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ link: $("link").value.trim() }),
+    body: JSON.stringify({ link }),
   });
-};
-$("file-button").onclick = () => $("upload").click();
-$("upload").onchange = async () => {
-  const file = $("upload").files[0];
-  if (!file) return;
-  if (file.size > 2097152) {
-    message("error", "Torrent metadata must be at most 2 MiB.");
-    $("upload").value = "";
+}
+function addTorrentBytes(body) {
+  if (current) {
+    banner(
+      "Stop the current torrent before adding another. They share one RAM cache.",
+    );
     return;
   }
-  await add(
+  return add(
     {
       method: "POST",
       headers: { "Content-Type": "application/x-bittorrent" },
-      body: await file.arrayBuffer(),
+      body,
     },
     "/api/torrents/file",
   );
+}
+async function addFile(file) {
+  if (!file) return;
+  if (file.size > 2097152) {
+    banner(
+      "This .torrent file is larger than 2 MiB, the limit for torrent metadata.",
+    );
+    return;
+  }
+  await addTorrentBytes(await file.arrayBuffer());
+}
+// The Mac app's File → Open Torrent File… (⌘O) passes the file as base64.
+window.torrstreamAddTorrent = (base64) =>
+  addTorrentBytes(Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)));
+$("add").onsubmit = (event) => {
+  event.preventDefault();
+  const link = $("link").value.trim();
+  if (link) addLink(link);
+};
+$("file-button").onclick = () => $("upload").click();
+$("upload").onchange = async () => {
+  await addFile($("upload").files[0]);
   $("upload").value = "";
 };
 $("stop").onclick = async () => {
   $("stop").disabled = true;
   try {
     await api("/api/torrents", { method: "DELETE" });
-    message("error", "");
+    banner("");
+    playing = null;
     await refresh();
   } catch (e) {
-    message("error", e.message);
+    banner(e.message);
   } finally {
     $("stop").disabled = false;
   }
 };
-async function copy(url, button) {
-  const original = button.textContent;
+$("banner-close").onclick = () => {
+  dismissedError = $("banner-text").textContent;
+  banner("");
+};
+
+// A .torrent file dropped anywhere, or a magnet link pasted outside a text field.
+let dragDepth = 0;
+const draggingFiles = (event) =>
+  [...(event.dataTransfer?.types || [])].includes("Files");
+document.addEventListener("dragenter", (event) => {
+  if (!draggingFiles(event)) return;
+  event.preventDefault();
+  dragDepth += 1;
+  $("drop-overlay").hidden = false;
+});
+document.addEventListener("dragover", (event) => {
+  if (draggingFiles(event)) event.preventDefault();
+});
+document.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $("drop-overlay").hidden = true;
+});
+document.addEventListener("drop", (event) => {
+  if (!draggingFiles(event)) return;
+  event.preventDefault();
+  dragDepth = 0;
+  $("drop-overlay").hidden = true;
+  addFile(event.dataTransfer.files[0]);
+});
+document.addEventListener("paste", (event) => {
+  if (
+    current ||
+    loading ||
+    resolving ||
+    dialog ||
+    event.target.closest?.("input, textarea")
+  )
+    return;
+  const text = event.clipboardData?.getData("text")?.trim() || "";
+  if (!/^(magnet:\?|https?:\/\/)/i.test(text)) return;
+  event.preventDefault();
+  $("link").value = text;
+  addLink(text);
+});
+
+async function copy(text, done) {
   try {
-    if (window.torrstreamDesktop) desktop({ action: "copy", text: url });
-    else if (navigator.clipboard) await navigator.clipboard.writeText(url);
+    if (desktopApp) desktop({ action: "copy", text });
+    else if (navigator.clipboard) await navigator.clipboard.writeText(text);
     else {
       const field = document.createElement("textarea");
-      field.value = url;
+      field.value = text;
       field.style.position = "fixed";
       field.style.opacity = "0";
       document.body.append(field);
@@ -132,15 +260,13 @@ async function copy(url, button) {
       field.remove();
       if (!ok) throw Error("Copy unavailable");
     }
-    button.textContent = "Copied";
-    setTimeout(() => {
-      if (button.isConnected) button.textContent = original;
-    }, 1600);
+    toast(done);
   } catch {
-    message("error", url);
+    banner("Copy this address by hand: " + text);
   }
 }
 
+// Home network (the server calls it TV access)
 function showNetwork(n) {
   networkState = n;
   $("tv-switch").hidden = !n.local_control;
@@ -153,20 +279,43 @@ function showNetwork(n) {
   const urls = n.local_control
     ? n.addresses.map((a) => a.url)
     : [location.origin];
-  const fallback = !n.enabled ? "TV access off" : "Waiting for home network…";
-  const key = JSON.stringify([urls, fallback]);
+  const key = JSON.stringify([
+    urls,
+    n.enabled,
+    n.local_control,
+    n.errors.length > 0,
+  ]);
   if (key !== networkKey) {
     networkKey = key;
-    $("tv-addresses").replaceChildren();
-    for (const url of urls.length ? urls : [fallback]) {
-      const address = document.createElement("span");
-      address.textContent = url;
-      if (!urls.length) address.className = "muted";
-      $("tv-addresses").append(address);
+    const list = $("tv-addresses");
+    list.replaceChildren();
+    for (const url of urls) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "address";
+      button.title = "Copy address";
+      const text = document.createElement("span");
+      text.textContent = url;
+      button.append(text);
+      button.insertAdjacentHTML("beforeend", ICONS.copy);
+      button.onclick = () => copy(url, "Address copied");
+      list.append(button);
     }
+    message(
+      "tv-hint",
+      !n.local_control
+        ? "Connected over your home network."
+        : !n.enabled
+          ? "Off. Turn on to watch on a TV or another device."
+          : urls.length
+            ? "On your TV, enter this address in Lampa or another TorrServer app."
+            : n.errors.length
+              ? ""
+              : "Waiting for your home network…",
+    );
   }
   const error = n.errors.join("\n");
-  message("network-error", error);
+  message("tv-error", error);
   message("settings-error", error);
 }
 async function refreshNetwork() {
@@ -178,7 +327,7 @@ async function refreshNetwork() {
     if (revision === networkRevision && !networkBusy) showNetwork(network);
   } catch (e) {
     if (revision === networkRevision && !networkBusy)
-      message("network-error", e.message);
+      message("tv-error", e.message);
   } finally {
     networkReadBusy = false;
   }
@@ -200,7 +349,7 @@ async function updateNetwork(enabled, port) {
     desktop({ action: "saveTVSettings", enabled: n.enabled, port: n.port });
     return n.errors.length === 0;
   } catch (e) {
-    message("network-error", e.message);
+    message("tv-error", e.message);
     message("settings-error", e.message);
     if (networkState) $("tv-enabled").checked = networkState.enabled;
     return false;
@@ -211,7 +360,7 @@ async function updateNetwork(enabled, port) {
   }
 }
 $("tv-enabled").onchange = () =>
-  updateNetwork($("tv-enabled").checked, networkState?.port || 8091);
+  updateNetwork($("tv-enabled").checked, networkState?.port || 8090);
 $("port-form").onsubmit = async (event) => {
   event.preventDefault();
   if (
@@ -226,110 +375,168 @@ async function initNetwork() {
   try {
     const n = await api("/api/network");
     showNetwork(n);
-    if (window.torrstreamDesktop && n.local_control && window.torrstreamTV) {
+    if (desktopApp && n.local_control && window.torrstreamTV) {
       await updateNetwork(
         window.torrstreamTV.enabled,
         window.torrstreamTV.port,
       );
     }
   } catch (e) {
-    message("network-error", e.message);
+    message("tv-error", e.message);
   }
 }
 
-function files(torrent) {
+// Torrent and files
+function streamUrl(torrent, file) {
+  return (
+    location.origin +
+    "/stream?link=" +
+    encodeURIComponent(torrent.hash) +
+    "&index=" +
+    file.id +
+    "&play"
+  );
+}
+function markPlaying() {
+  for (const row of $("files").children) {
+    row.querySelector(".tag").hidden =
+      Number(row.dataset.id) !== playing || !current?.active_readers;
+  }
+}
+function showTorrent(torrent) {
+  current = torrent || null;
+  $("add-view").hidden = Boolean(torrent);
+  $("files-view").hidden = !torrent;
   $("stop").hidden = !torrent;
-  $("torrent-name").textContent = torrent ? torrent.title : "Ready to stream";
-  $("file-count").textContent = torrent
-    ? torrent.file_stats.length +
-      (torrent.file_stats.length === 1 ? " file" : " files")
-    : "";
+  if (torrent) {
+    const count = torrent.file_stats.length;
+    $("torrent-name").textContent = torrent.title;
+    $("torrent-name").title = torrent.title;
+    $("torrent-meta").textContent =
+      count +
+      (count === 1 ? " file · " : " files · ") +
+      size(torrent.torrent_size);
+  } else {
+    $("torrent-name").title = "";
+    showAddState();
+  }
   const hash = torrent?.hash || null;
-  if (hash === lastHash) return;
-  lastHash = hash;
-  $("files").replaceChildren();
-  if (!torrent) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = "Add a magnet link or open a .torrent file.";
-    $("files").append(empty);
-    return;
+  if (hash !== lastHash) {
+    lastHash = hash;
+    renderFiles(torrent);
   }
+  markPlaying();
+}
+function renderFiles(torrent) {
+  const list = $("files");
+  list.replaceChildren();
+  list.scrollTop = 0;
+  if (!torrent) return;
+  const rows = document.createDocumentFragment();
   for (const file of torrent.file_stats) {
-    const row = document.createElement("div");
-    row.className = "file";
-    const name = document.createElement("div");
+    const kind = kindOf(file.path);
+    const row = document.createElement("li");
+    row.className = "file " + kind;
+    row.dataset.id = file.id;
+    const icon = document.createElement("span");
+    icon.className = "file-icon";
+    icon.innerHTML = ICONS[kind];
+    const name = document.createElement("span");
     name.className = "file-name";
-    name.textContent = file.path;
-    const length = document.createElement("small");
+    name.title = file.path;
+    const slash = file.path.lastIndexOf("/");
+    if (slash >= 0) {
+      const dir = document.createElement("span");
+      dir.className = "dir";
+      dir.textContent = file.path.slice(0, slash + 1);
+      name.append(dir);
+    }
+    const base = document.createElement("span");
+    base.className = "base";
+    base.textContent = file.path.slice(slash + 1);
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = "Playing";
+    tag.hidden = true;
+    name.append(base, tag);
+    const length = document.createElement("span");
+    length.className = "file-size";
     length.textContent = size(file.length);
-    name.append(length);
-    const actions = document.createElement("div");
-    actions.className = "file-actions";
-    const url =
-      location.origin +
-      "/stream?link=" +
-      encodeURIComponent(torrent.hash) +
-      "&index=" +
-      file.id +
-      "&play";
-    const cp = document.createElement("button");
-    cp.textContent = "Copy stream URL";
-    cp.onclick = () => copy(url, cp);
-    const play = document.createElement("a");
-    play.className = "button primary";
-    play.textContent = window.torrstreamDesktop
-      ? "Open in player"
-      : "Open in VLC";
-    play.href = window.torrstreamDesktop
-      ? "torrstream-player://play?url=" + encodeURIComponent(url)
-      : "vlc://" + url;
-    actions.append(cp, play);
-    row.append(name, actions);
-    $("files").append(row);
+    const url = streamUrl(torrent, file);
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "tool icon-only";
+    copyButton.title = "Copy stream URL";
+    copyButton.setAttribute("aria-label", "Copy stream URL of " + file.path);
+    copyButton.innerHTML = ICONS.copy;
+    copyButton.onclick = () => copy(url, "Stream URL copied");
+    row.append(icon, name, length, copyButton);
+    if (kind === "video" || kind === "audio") {
+      const play = document.createElement("a");
+      play.className = "tool play";
+      play.href = desktopApp
+        ? "torrstream-player://play?url=" + encodeURIComponent(url)
+        : "vlc://" + url;
+      play.title = desktopApp ? "Open in VLC or IINA" : "Open in VLC";
+      play.setAttribute("aria-label", "Play " + file.path);
+      play.innerHTML = ICONS.play + '<span class="label">Play</span>';
+      play.addEventListener("click", () => {
+        playing = file.id;
+        markPlaying();
+      });
+      row.append(play);
+    } else row.append(document.createElement("span"));
+    rows.append(row);
   }
+  list.append(rows);
+}
+function setState(kind, text) {
+  if ($("state").dataset.kind !== kind) $("state").dataset.kind = kind;
+  if ($("state-text").textContent !== text) $("state-text").textContent = text;
 }
 async function refresh() {
   if (statusBusy || document.hidden) return;
   statusBusy = true;
   try {
     const s = await api("/api/status");
-    $("rss").innerHTML =
-      (s.resident_bytes ? mib(s.resident_bytes) : "—") + " <span>MiB</span>";
+    const t = s.torrent;
+    resolving = Boolean(s.resolving);
+    const speed = mbps(t?.download_speed) + " <small>Mbps</small>";
+    $("speed").innerHTML = speed;
+    $("peer-total").innerHTML = speed;
+    const count = t?.active_peers || 0;
+    $("peers").textContent = !t
+      ? "No torrent"
+      : count
+        ? count + (count === 1 ? " peer" : " peers")
+        : "Looking for peers";
     $("cache").innerHTML =
       mib(s.cache.reserved_bytes) +
-      " <span>/ " +
-      mib(s.cache.budget_bytes) +
-      " MiB</span>";
+      " <small>/ " +
+      Math.round(s.cache.budget_bytes / 1048576) +
+      " MiB</small>";
+    $("meter").style.width =
+      Math.min(100, (100 * s.cache.reserved_bytes) / s.cache.budget_bytes) +
+      "%";
+    $("rss").innerHTML =
+      (s.resident_bytes ? mib(s.resident_bytes) : "—") + " <small>MiB</small>";
     $("cache-pieces").textContent = s.cache.cached_pieces;
     $("cache-evictions").textContent = s.cache.evictions;
     $("cache-piece-size").textContent = s.cache.piece_bytes
       ? size(s.cache.piece_bytes)
       : "—";
-    $("meter").style.width =
-      Math.min(100, (100 * s.cache.reserved_bytes) / s.cache.budget_bytes) +
-      "%";
-    $("speed").innerHTML = speedMarkup(s.torrent?.download_speed);
-    $("peer-total").innerHTML = speedMarkup(s.torrent?.download_speed);
-    const count = s.torrent?.active_peers || 0;
-    $("peers").textContent = count
-      ? count + (count === 1 ? " connected peer" : " connected peers")
-      : "No active peers";
     $("app-version").textContent = s.version;
-    $("footer-status").textContent =
-      loading || s.resolving
-        ? "Resolving…"
-        : !s.torrent
-          ? "Idle"
-          : s.torrent.stat === 2
-            ? "Buffering…"
-            : s.torrent.active_readers
-              ? "Streaming"
-              : "Ready for playback";
-    files(s.torrent);
-    if (s.torrent?.engine?.error) message("error", s.torrent.engine.error);
+    showTorrent(t);
+    const error = t?.engine?.error || t?.preload_error || "";
+    if (loading || resolving) setState("busy", "Adding torrent…");
+    else if (!t) setState("idle", "Idle");
+    else if (error) setState("error", "Torrent error");
+    else if (t.stat === 2) setState("busy", "Buffering…");
+    else if (t.active_readers) setState("ok", "Streaming");
+    else setState("ready", "Ready to play");
+    if (error && error !== dismissedError) banner(error);
   } catch (e) {
-    $("footer-status").textContent = "Server unavailable: " + e.message;
+    setState("error", "Server unavailable");
     if (dialog === "peers") {
       peerRates.reset();
       message("peer-error", "Server unavailable");
@@ -339,6 +546,7 @@ async function refresh() {
   }
 }
 
+// Peer details
 function stopPeerUpdates() {
   peerRun += 1;
   clearTimeout(peerTimer);
@@ -364,7 +572,10 @@ async function readPeers(run) {
     if (run !== peerRun || dialog !== "peers") return;
     const peers = peerRates.sample(sample);
     $("peer-summary").textContent =
-      peers.length + " connected · limit " + sample.peer_limit;
+      peers.length +
+      (peers.length === 1 ? " peer" : " peers") +
+      " connected · limit " +
+      sample.peer_limit;
     const rows = document.createDocumentFragment();
     for (const peer of peers) {
       const row = document.createElement("tr");
@@ -377,7 +588,7 @@ async function readPeers(run) {
       rate.textContent =
         peer.download_bps === null
           ? "Measuring…"
-          : ((peer.download_bps * 8) / 1000000).toFixed(1) + " Mbps";
+          : mbps(peer.download_bps) + " Mbps";
       const received = document.createElement("td");
       received.textContent = size(peer.received_bytes);
       row.append(address, rate, received);
@@ -387,16 +598,16 @@ async function readPeers(run) {
     $("peer-table").hidden = peers.length === 0;
     $("peer-empty").hidden = peers.length !== 0;
     $("peer-empty").textContent = sample.session
-      ? "Waiting for connected peers…"
-      : "No torrent loaded.";
+      ? "Waiting for peers to connect…"
+      : "No torrent is loaded.";
     message("peer-error", "");
   } catch (e) {
     if (run !== peerRun || dialog !== "peers") return;
     peerRates.reset();
     $("peer-rows").replaceChildren();
     $("peer-table").hidden = true;
-    message("peer-error", "Could not update peers: " + e.message);
     $("peer-empty").hidden = true;
+    message("peer-error", "Could not update peers: " + e.message);
   } finally {
     if (run === peerRun) {
       peerAbort = null;
@@ -405,17 +616,19 @@ async function readPeers(run) {
     }
   }
 }
+
+// Dialogs
+const DIALOGS = ["settings", "peers", "license"];
 function openDialog(name, trigger) {
   stopPeerUpdates();
   if (trigger) returnFocus = trigger;
   dialog = name;
   $("overlay").hidden = false;
-  for (const type of ["settings", "peers", "license"])
-    $(type + "-dialog").hidden = type !== name;
+  for (const type of DIALOGS) $(type + "-dialog").hidden = type !== name;
   $("app").inert = true;
   $("app").setAttribute("aria-hidden", "true");
-  document.body.style.overflow = "hidden";
   $("peers-button").setAttribute("aria-expanded", String(name === "peers"));
+  if (name === "settings") showTheme();
   $(name + "-dialog")
     .querySelector("button")
     .focus();
@@ -426,11 +639,9 @@ function closeDialog() {
   licenseRun += 1;
   dialog = null;
   $("overlay").hidden = true;
-  for (const type of ["settings", "peers", "license"])
-    $(type + "-dialog").hidden = true;
+  for (const type of DIALOGS) $(type + "-dialog").hidden = true;
   $("app").inert = false;
   $("app").removeAttribute("aria-hidden");
-  document.body.style.overflow = "";
   $("peers-button").setAttribute("aria-expanded", "false");
   $("peer-rows").replaceChildren();
   returnFocus?.focus();
@@ -444,9 +655,9 @@ $("license-back").onclick = () => {
   licenseRun += 1;
   openDialog("settings");
 };
-document.querySelectorAll("[data-close-dialog]").forEach((button) => {
-  button.onclick = closeDialog;
-});
+document
+  .querySelectorAll("[data-close-dialog]")
+  .forEach((button) => (button.onclick = closeDialog));
 $("overlay").onclick = (event) => {
   if (event.target === $("overlay")) closeDialog();
 };
@@ -456,7 +667,7 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     closeDialog();
   }
-  if (event.key === "Tab" && dialog) {
+  if (event.key === "Tab") {
     const controls = [
       ...$(dialog + "-dialog").querySelectorAll("button,input,a[href],summary"),
     ].filter((el) => !el.disabled && el.getClientRects().length);
@@ -489,12 +700,49 @@ document.querySelectorAll("[data-license]").forEach((button) => {
 });
 document.querySelectorAll("a[data-external]").forEach((link) => {
   link.onclick = (event) => {
-    if (window.torrstreamDesktop) {
+    if (desktopApp) {
       event.preventDefault();
       desktop({ action: "openExternal", url: link.href });
     }
   };
 });
+
+// Appearance: System, Light or Dark, as in Unified Mail. The Mac app stores
+// it and sets the window's appearance so the titlebar follows.
+function currentTheme() {
+  return document.documentElement.dataset.theme || "system";
+}
+function showTheme() {
+  for (const button of document.querySelectorAll("#theme button")) {
+    button.setAttribute(
+      "aria-checked",
+      String(button.dataset.theme === currentTheme()),
+    );
+  }
+}
+function applyTheme(theme) {
+  if (theme === "system")
+    document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.dataset.theme = theme;
+  showTheme();
+}
+document.querySelectorAll("#theme button").forEach((button) => {
+  button.onclick = () => {
+    applyTheme(button.dataset.theme);
+    try {
+      localStorage.setItem("theme", button.dataset.theme);
+    } catch {}
+    desktop({ action: "setTheme", theme: button.dataset.theme });
+  };
+});
+try {
+  applyTheme(
+    window.torrstreamTheme || localStorage.getItem("theme") || "system",
+  );
+} catch {
+  applyTheme("system");
+}
+
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopPeerUpdates();
   else {
