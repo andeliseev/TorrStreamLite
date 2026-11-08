@@ -1,9 +1,9 @@
 [package]
 name = "torrstream-lite"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.94"
-license = "Apache-2.0"
+license = "MIT"
 description = "A bounded-RAM torrent streaming server for Keenetic and macOS"
 
 [workspace]

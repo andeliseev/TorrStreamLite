@@ -19,6 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     menu.addItem(root)
     let appMenu = NSMenu()
     appMenu.addItem(
+      withTitle: "About TorrStream Lite", action: #selector(openSettings), keyEquivalent: "")
+    appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+    appMenu.addItem(NSMenuItem.separator())
+    appMenu.addItem(
       withTitle: "Quit TorrStream Lite", action: #selector(NSApplication.terminate(_:)),
       keyEquivalent: "q")
     root.submenu = appMenu
@@ -33,10 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     menu.addItem(editRoot)
     NSApp.mainMenu = menu
     window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 1020, height: 780),
+      contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false
     )
-    window.title = "TorrStream Lite — RAM-only streaming"
+    window.title = "TorrStream Lite"
     window.minSize = NSSize(width: 740, height: 560)
     let configuration = WKWebViewConfiguration()
     let tvEnabled = UserDefaults.standard.bool(forKey: "tvAccessEnabled")
@@ -106,6 +110,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     alert.informativeText = message
     alert.runModal()
   }
+  @objc func openSettings() {
+    web.evaluateJavaScript("window.torrstreamOpenSettings?.()", completionHandler: nil)
+  }
+
+  func openProjectLink(_ raw: String) {
+    guard let url = URL(string: raw), url.scheme == "https", url.host == "github.com",
+      url.user == nil, url.password == nil, url.port == nil,
+      [
+        "/andeliseev/TorrStreamLite", "/andeliseev/TorrStreamLite/releases",
+        "/YouROK/TorrServer", "/ikatson/rqbit",
+      ].contains(url.path)
+    else { return }
+    NSWorkspace.shared.open(url)
+  }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
   func userContentController(
     _ userContentController: WKUserContentController, didReceive message: WKScriptMessage
@@ -117,6 +135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       let body = message.body as? [String: Any], let action = body["action"] as? String
     else { return }
     switch action {
+    case "openExternal":
+      if let url = body["url"] as? String { openProjectLink(url) }
     case "saveTVSettings":
       if let enabled = body["enabled"] as? Bool, let port = body["port"] as? Int,
         (1024...65535).contains(port)

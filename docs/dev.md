@@ -2,21 +2,30 @@
 
 Run commands below from the repository root. [Back to the app guide](../README.md).
 
-## Build and test
+## Build the Mac app
 
 Requires a recent Rust toolchain (tested with Rust 1.99.1). `scripts/cargo.sh` uses the project-local toolchain under `.build/` when present, otherwise the system toolchain. Rust dependency versions are in `Cargo.lock`.
+
+The Mac build also requires Xcode's command-line tools and targets the Mac's native architecture.
+
+```sh
+sh scripts/build-macos.sh
+```
+
+Open **`dist/TorrStream Lite.app`** in Finder. Quit and reopen the app after rebuilding to load the new binary. This command builds only the app; DMG packaging and the router build are separate optional steps. The app is ad-hoc signed, not notarized.
+
+The native window uses Swift/WebKit and launches the bundled Rust server on an available loopback port. The window, player, and decoder use memory separately from the server reading shown in the app.
+
+## Test
 
 ```sh
 sh scripts/cargo.sh test --locked
 sh scripts/cargo.sh clippy --locked --all-targets -- -D warnings
-sh scripts/build-macos.sh
 python3 tests/network.py
 python3 tests/e2e.py --cache-mib 6 --size-mib 64
 python3 tests/e2e.py --cache-mib 96 --size-mib 256 --rate-mbps 80 --report test-results/router-profile.json
 python3 tests/e2e.py --cache-mib 6 --size-mib 64 --corrupt-first --report test-results/corruption-recovery.json
 ```
-
-The Mac packaging script additionally requires Xcode's command-line tools. It builds for the Mac's native architecture; the artifact supplied here is ARM64.
 
 To generate a real 4K test video with FFmpeg and offer it to the app through a local torrent peer:
 
@@ -26,6 +35,29 @@ python3 tests/serve_fixture.py --video /tmp/torrstream-lite-4k-test.mp4
 ```
 
 Paste the printed torrent URL into the app. The test peer reads the generated video from disk; **TorrStream Lite itself still stores all received video in RAM**.
+
+## Project layout
+
+| Folder | Contents |
+|---|---|
+| `src/` | Rust streaming server, bounded RAM cache, and TV access |
+| `ui/` | Control page HTML, CSS, and JavaScript; embedded in the server |
+| `macos/` | Native Mac window and app metadata |
+| `scripts/` | Mac build, optional router build, and Rust toolchain helper |
+| `tests/` | Local torrent, streaming, memory, and network checks |
+| `vendor/` | Pinned Rust torrent engine, modifications, and license |
+| `docs/` | Development notes and router setup |
+| `.github/workflows/` | Automatic checks and manually started releases |
+
+`.build/` and `target/` are local toolchain/build caches. `dist/`, `release-assets/`, and `test-results/` contain generated outputs. These folders and Python/macOS cache files are excluded from Git.
+
+## Publishing releases
+
+Open [Actions → Release](https://github.com/andeliseev/TorrStreamLite/actions/workflows/release.yml), choose **Run workflow** on `main`, then select a version bump and **macOS**, **Keenetic**, or **macOS and Keenetic**. An optional exact version overrides the bump. The first release uses the source version unless overridden.
+
+The workflow runs the checks, commits any version update, creates a draft, and builds an Apple Silicon DMG and/or a compressed static Linux ARM64 executable with SHA-256 checksum files. It publishes the release only after all selected builds succeed. It uses the repository's built-in `GITHUB_TOKEN`; no extra release secret is required. Repository rules must allow Actions to write `main` for automatic version updates. A failed build leaves a draft; start a new run for the same unpublished version to replace that draft and rebuild its assets.
+
+Pushes to `main` and pull requests run **Checks** without publishing a release. The Mac app is ad-hoc signed and is not notarized; Keenetic builds still need testing on hardware.
 
 ## Memory behavior
 
@@ -77,6 +109,8 @@ Native API:
 | Request | Behavior |
 |---|---|
 | `GET /api/status` | RSS, cache accounting, torrent/files, engine stats |
+| `GET /api/peers` | Connected peer counters, torrent session ID, monotonic sample time; no stored history |
+| `GET /licenses/app`, `GET /licenses/third-party` | Offline MIT and engine license/attribution text |
 | `GET /api/network` | TV addresses, port, and local-control availability |
 | `POST /api/network` | Localhost only: JSON `{"enabled":true,"port":8091}`; no torrent restart |
 | `POST /api/torrents` | JSON `{"link":"magnet:?..."}` or torrent URL |
@@ -95,6 +129,7 @@ Run the Lampa and release-helper regressions with:
 ```sh
 python3 tests/lampa.py
 python3 tests/release.py
+node tests/peer-rates.cjs
 ```
 
 The Lampa test uses a local BitTorrent peer and reproduces ping, form-labelled JSON, opaque TV origins, torrent URL add, file selection, delayed preload progress, cache statistics, playback/seek, viewed positions, and teardown. It also checks that Lampa cannot change native network settings and that unrelated browser origins are rejected. This does not test a physical TV's widget or decoder.
@@ -110,4 +145,6 @@ sh scripts/cargo.sh fmt --all
 xcrun swift-format format --in-place macos/App.swift
 ```
 
-The three files in `ui/` are embedded into the Rust binary at compile time, so rebuild the Mac app after editing them. `macos/Info.plist` contains the native app metadata.
+The files in `ui/` are embedded into the Rust binary at compile time, so rebuild the Mac app after editing them. `macos/Info.plist` contains the native app metadata.
+
+The peer details endpoint returns only connected peers, bounded by the configured peer limit. The browser calculates rates from received-byte deltas and the server's monotonic sample time. New peers, reconnections, counter resets, torrent changes, and gaps longer than 10 seconds require a fresh baseline. The peer panel polls every 1.5 seconds while open and visible, cancels pending requests when closed/hidden, and keeps only two bounded snapshots. The server adds no periodic sampler or peer history.

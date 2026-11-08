@@ -155,7 +155,9 @@ jobs:
           file dist/torrstream-lite-linux-arm64 | grep -q 'ARM aarch64'
           file dist/torrstream-lite-linux-arm64 | grep -q 'statically linked'
           mkdir -p release-assets
-          tar -C dist -czf "release-assets/TorrStream-Lite-$VERSION-linux-arm64.tar.gz" torrstream-lite-linux-arm64
+          tar -czf "release-assets/TorrStream-Lite-$VERSION-linux-arm64.tar.gz" \
+            LICENSE THIRD_PARTY_NOTICES.txt licenses/Apache-2.0.txt \
+            -C dist torrstream-lite-linux-arm64
       - name: Add checksums
         run: |
           python3 - <<'PY'

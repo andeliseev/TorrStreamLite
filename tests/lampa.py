@@ -78,6 +78,17 @@ def main():
                 else:
                     raise AssertionError(f'{path}: expected HTTP {code}')
 
+            empty_peers = api('/api/peers', origin=base)
+            assert empty_peers['session'] is None and empty_peers['peers'] == []
+            with request('/licenses/app', origin=base) as response:
+                license_text = response.read().decode()
+                assert 'MIT License' in license_text and '2026 Andrei Eliseev' in license_text
+            with request('/licenses/third-party', origin=base) as response:
+                notices = response.read().decode()
+                assert 'Copyright 2021 Igor Katson' in notices
+                assert 'Version 2.0, January 2004' in notices
+            mark('Offline app and engine license notices; idle peer response')
+
             for origin in ('null', 'http://lampa.mx', 'https://lampa.mx', 'http://lampa.app', 'https://lampa.app'):
                 with request('/', origin=origin) as response:
                     assert response.status == 200
@@ -94,6 +105,7 @@ def main():
             for origin in ('null', 'https://lampa.mx'):
                 error(403, '/api/network', origin=origin, data={'enabled': True})
                 error(403, '/api/torrents', origin=origin, data={'link': 'invalid'})
+                error(403, '/api/peers', origin=origin)
             error(403, '/settings', origin='https://unrelated.example', data={'action': 'get'})
             error(403, '/settings', origin='https://lampa.mx.unrelated.example', data={'action': 'get'})
             error(415, '/api/torrents', origin=base, data={'link': 'invalid'})
@@ -119,8 +131,13 @@ def main():
             assert progress['preloaded_bytes'] < progress['preload_size']
             # A repeated preload must not allocate a second reader/window.
             api(stream + '&preload', timeout=2)
+            peer_samples = []
             for _ in range(200):
                 progress = api(stream + '&stat', timeout=2)
+                sample = api('/api/peers', origin=base)
+                assert len(sample['peers']) <= sample['peer_limit']
+                assert sample['session'].startswith(hash_value + ':')
+                peer_samples.append(sample)
                 assert not progress['preload_error'], progress
                 assert progress['active_readers'] <= 1
                 if progress['preloaded_bytes'] == progress['preload_size']:
@@ -132,6 +149,12 @@ def main():
             assert 0 < cache['Filled'] <= cache['Capacity'] == 6 * 1048576
             assert cache['Torrent']['hash'] == hash_value
             mark('Preload returns within Lampa timeout, reports real progress and keeps bounded cache')
+            received = [sum(p['received_bytes'] for p in s['peers']) for s in peer_samples]
+            assert max(received) > min(received), received
+            assert all(b['sampled_at_ms'] > a['sampled_at_ms'] for a, b in zip(peer_samples, peer_samples[1:]))
+            with request('/api/peers', origin=base) as response:
+                assert response.headers['Cache-Control'] == 'no-store'
+            mark('Real peer byte counters advance with monotonic sample time and a bounded connection list')
 
             for offset in (0, swarm.movie_size - 10003):
                 with request(stream + '&play', headers={'Range': f'bytes={offset}-{offset + 10002}'}) as response:
@@ -154,6 +177,7 @@ def main():
             api('/torrents', {'action': 'drop', 'hash': hash_value})
             status = api('/api/status', origin=base)
             assert status['cache']['allocated_bytes'] == 0 and status['torrent'] is None
+            assert api('/api/peers', origin=base)['peers'] == []
             assert api('/viewed', {'action': 'list', 'hash': hash_value}) == []
             assert not list(Path(tmp).iterdir())
             mark('Stopping preload releases RAM and does not write payload/history files')

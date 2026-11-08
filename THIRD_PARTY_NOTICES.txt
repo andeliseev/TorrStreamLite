@@ -1,0 +1,24 @@
+TorrStream Lite
+
+The original application code is licensed under MIT, copyright (c) 2026
+Andrei Eliseev. The root LICENSE applies to that code, not to third-party
+source bundled under vendor/ or other dependencies.
+
+librqbit / rqbit
+https://github.com/ikatson/rqbit
+Copyright 2021 Igor Katson
+License: Apache License, Version 2.0
+Pinned source: f23bacdddcc5318caa813418b8eb1b1d7307faaa
+
+The modified torrent engine and related vendored crates remain under
+Apache-2.0. Original source notices are retained in vendor/rqbit.
+Local storage, scheduler, and metadata-limit modifications are described
+in vendor/UPSTREAM.md. The full Apache-2.0 text is in licenses/Apache-2.0.txt
+and is also available from the app's Settings.
+
+TorrStream Lite is an independent implementation inspired by TorrServer:
+https://github.com/YouROK/TorrServer
+No TorrServer Go implementation is included in this app.
+
+Other dependencies retain their own licenses and copyright notices.
+Their versions and source references are recorded in Cargo.lock.

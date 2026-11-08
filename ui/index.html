@@ -7,103 +7,289 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main>
-      <header>
-        <div>
-          <h1>
-            TorrStream
-            <span>Lite</span>
-          </h1>
-          <small>One stream. A bounded memory cache.</small>
-        </div>
-        <span class="badge">RAM ONLY</span>
-      </header>
-      <section class="metrics">
-        <div class="metric">
-          <small>SERVER MEMORY</small>
-          <div class="number" id="rss">—</div>
-          <small>Resident memory of the streaming server</small>
-        </div>
-        <div class="metric">
-          <small>CACHE RESERVED</small>
-          <div class="number" id="cache">—</div>
-          <small id="cache-detail">Waiting for server</small>
-          <div class="meter"><div id="meter"></div></div>
-        </div>
-        <div class="metric">
-          <small>DOWNLOAD SPEED</small>
-          <div class="number" id="speed">—</div>
-          <small id="peers">No torrent loaded</small>
-        </div>
-      </section>
-      <section class="panel" id="tv-panel" hidden>
-        <div class="tv-heading">
-          <h2>Watch on TV</h2>
-          <label class="switch">
-            <input type="checkbox" id="tv-enabled" />
-            Allow TV access
+    <div id="app">
+      <header class="toolbar">
+        <h1>
+          TorrStream
+          <span>Lite</span>
+        </h1>
+        <div class="network" id="tv-panel">
+          <div id="tv-addresses" aria-label="Server address">
+            <span class="muted">Checking network…</span>
+          </div>
+          <label class="switch" id="tv-switch">
+            <input type="checkbox" id="tv-enabled" disabled />
+            TV access
           </label>
         </div>
-        <p class="network-note" id="tv-status">Checking your home network…</p>
-        <div id="tv-addresses"></div>
-        <p id="network-error" role="alert"></p>
-        <details class="network-options" id="tv-options">
-          <summary>Connection options</summary>
-          <div class="row">
+        <button
+          id="settings-button"
+          class="icon-button"
+          aria-label="Settings"
+          aria-haspopup="dialog"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 6h8m4 0h4M4 12h2m4 0h10M4 18h10m4 0h2" />
+            <circle cx="14" cy="6" r="2" />
+            <circle cx="8" cy="12" r="2" />
+            <circle cx="16" cy="18" r="2" />
+          </svg>
+        </button>
+      </header>
+      <main>
+        <p id="network-error" class="error" role="alert" hidden></p>
+        <section class="metrics" aria-label="Server statistics">
+          <div class="metric">
+            <small>Server memory</small>
+            <div class="number" id="rss">
+              —
+              <span>MiB</span>
+            </div>
+          </div>
+          <div class="metric">
+            <small>Cache reserved</small>
+            <div class="number" id="cache">
+              —
+              <span>/ 96 MiB</span>
+            </div>
+            <div class="meter" aria-hidden="true"><div id="meter"></div></div>
+          </div>
+          <button
+            class="metric speed-button"
+            id="peers-button"
+            aria-label="Download speed. Open peer details"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+          >
+            <small>
+              Download
+              <span aria-hidden="true">›</span>
+            </small>
+            <span class="number" id="speed">
+              —
+              <span>Mbps</span>
+            </span>
+            <small id="peers">No active peers</small>
+          </button>
+        </section>
+        <section aria-label="Add a torrent">
+          <form id="add" class="row">
+            <input
+              id="link"
+              aria-label="Magnet or torrent URL"
+              placeholder="Magnet link or .torrent URL"
+              required
+            />
+            <button id="add-button" class="primary">Add torrent</button>
+            <button type="button" id="file-button">Open .torrent</button>
+            <input id="upload" type="file" accept=".torrent" hidden />
+          </form>
+          <p id="hint" class="muted" role="status" hidden></p>
+          <p id="error" class="error" role="alert" hidden></p>
+        </section>
+        <section class="files-panel" aria-label="Torrent files">
+          <div class="section-heading">
+            <div>
+              <h2 id="torrent-name">Ready to stream</h2>
+              <small id="file-count"></small>
+            </div>
+            <button id="stop" class="stop" hidden>
+              Stop &amp; release RAM
+            </button>
+          </div>
+          <div id="files">
+            <div class="empty">Add a magnet link or open a .torrent file.</div>
+          </div>
+        </section>
+        <footer>
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="footer-status">Connecting…</span>
+        </footer>
+      </main>
+    </div>
+    <div class="overlay" id="overlay" hidden>
+      <section
+        class="dialog"
+        id="settings-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        hidden
+      >
+        <div class="dialog-heading">
+          <h2 id="settings-title">Settings</h2>
+          <button
+            class="icon-button"
+            data-close-dialog
+            aria-label="Close settings"
+          >
+            ×
+          </button>
+        </div>
+        <section id="connection-options">
+          <h3>Connection</h3>
+          <form class="port-row" id="port-form">
             <label for="tv-port">TV port</label>
             <input
               type="number"
               id="tv-port"
               min="1024"
               max="65535"
+              required
               value="8091"
             />
-            <button id="tv-apply" class="secondary">Apply port</button>
-          </div>
-          <p class="network-note">
-            Keep this Mac awake and connect the TV to the same home network.
-            Devices on this network can control playback while TV access is on.
-          </p>
+            <button id="tv-apply">Apply</button>
+          </form>
+        </section>
+        <p id="remote-settings" class="muted" hidden>
+          Connection options are controlled on the server.
+        </p>
+        <p id="settings-error" class="error" role="alert" hidden></p>
+        <details class="diagnostics">
+          <summary>Cache diagnostics</summary>
+          <dl>
+            <div>
+              <dt>Occupied piece slots</dt>
+              <dd id="cache-pieces">0</dd>
+            </div>
+            <div>
+              <dt>Pieces replaced</dt>
+              <dd id="cache-evictions">0</dd>
+            </div>
+            <div>
+              <dt>Piece size</dt>
+              <dd id="cache-piece-size">—</dd>
+            </div>
+          </dl>
         </details>
-      </section>
-      <section class="panel">
-        <h2>Add a torrent</h2>
-        <form id="add">
-          <div class="row">
-            <input
-              id="link"
-              aria-label="Magnet or torrent URL"
-              placeholder="Paste a magnet link or .torrent URL"
-              required
-            />
-            <button id="add-button">Add torrent</button>
-            <button type="button" class="secondary" id="file-button">
-              Open .torrent
+        <section class="about">
+          <h3>
+            TorrStream Lite
+            <span id="app-version">—</span>
+          </h3>
+          <div class="about-links">
+            <a
+              href="https://github.com/andeliseev/TorrStreamLite"
+              target="_blank"
+              rel="noreferrer"
+              data-external
+            >
+              GitHub
+            </a>
+            <span>·</span>
+            <a
+              href="https://github.com/andeliseev/TorrStreamLite/releases"
+              target="_blank"
+              rel="noreferrer"
+              data-external
+            >
+              Releases
+            </a>
+            <span>·</span>
+            <button class="link-button" data-license="app">MIT license</button>
+          </div>
+          <p>© 2026 Andrei Eliseev</p>
+          <p class="credits">
+            Inspired by
+            <a
+              href="https://github.com/YouROK/TorrServer"
+              target="_blank"
+              rel="noreferrer"
+              data-external
+            >
+              TorrServer
+            </a>
+            .
+            <br />
+            Uses
+            <a
+              href="https://github.com/ikatson/rqbit"
+              target="_blank"
+              rel="noreferrer"
+              data-external
+            >
+              librqbit
+            </a>
+            under
+            <button class="link-button" data-license="third-party">
+              Apache-2.0
             </button>
-            <input id="upload" type="file" accept=".torrent" />
-          </div>
-        </form>
-        <div id="hint">Video stays in RAM. Use VLC or IINA for 4K files.</div>
-        <div id="error" role="alert"></div>
+            .
+          </p>
+        </section>
       </section>
-      <section class="panel">
-        <div class="row" style="justify-content: space-between">
-          <h2 id="torrent-name">Ready to stream</h2>
-          <button id="stop" class="stop" hidden>Stop & release RAM</button>
-        </div>
-        <div id="files">
-          <div class="empty">
-            Add a torrent, then open a file in your player.
+      <section
+        class="dialog peer-dialog"
+        id="peers-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="peers-title"
+        hidden
+      >
+        <div class="dialog-heading">
+          <div>
+            <h2 id="peers-title">Download details</h2>
+            <small id="peer-summary">Loading peers…</small>
           </div>
+          <button
+            class="icon-button"
+            data-close-dialog
+            aria-label="Close peer details"
+          >
+            ×
+          </button>
+        </div>
+        <div class="peer-total">
+          <span class="number" id="peer-total">
+            —
+            <span>Mbps</span>
+          </span>
+          <small>Current download</small>
+        </div>
+        <p id="peer-error" class="error" role="alert" hidden></p>
+        <div class="peer-scroll">
+          <table id="peer-table" hidden>
+            <thead>
+              <tr>
+                <th>Peer / client</th>
+                <th>Speed</th>
+                <th>Received</th>
+              </tr>
+            </thead>
+            <tbody id="peer-rows"></tbody>
+          </table>
+          <p id="peer-empty" class="empty">Loading peers…</p>
         </div>
       </section>
-      <div class="footer">
-        The cache is a hard limit on video buffers, not on total process memory.
-        Mac window and player memory are separate.
-        <br />
-        <span id="footer-status">Connecting…</span>
-      </div>
-    </main>
+      <section
+        class="dialog license-dialog"
+        id="license-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="license-title"
+        hidden
+      >
+        <div class="dialog-heading">
+          <button
+            class="icon-button"
+            id="license-back"
+            aria-label="Back to Settings"
+          >
+            ‹
+          </button>
+          <h2 id="license-title">MIT license</h2>
+          <button
+            class="icon-button"
+            data-close-dialog
+            aria-label="Close license"
+          >
+            ×
+          </button>
+        </div>
+        <pre id="license-text">Loading…</pre>
+      </section>
+    </div>
+    <script src="/peer-rates.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

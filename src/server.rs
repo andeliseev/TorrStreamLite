@@ -142,6 +142,38 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(|| async { format!("TorrStreamLite.{}", env!("CARGO_PKG_VERSION")) }),
         )
         .route("/api/status", get(status))
+        .route("/api/peers", get(peer_details))
+        .route(
+            "/peer-rates.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../ui/peer-rates.js"),
+                )
+            }),
+        )
+        .route(
+            "/licenses/app",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    include_str!("../LICENSE"),
+                )
+            }),
+        )
+        .route(
+            "/licenses/third-party",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    concat!(
+                        include_str!("../THIRD_PARTY_NOTICES.txt"),
+                        "\n\n",
+                        include_str!("../licenses/Apache-2.0.txt")
+                    ),
+                )
+            }),
+        )
         .route(
             "/api/network",
             get(crate::network::status).post(crate::network::update),
@@ -302,6 +334,41 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
         "cache":state.factory.snapshot(), "peer_limit":state.config.peers, "uptime_seconds":state.started.elapsed().as_secs(),
         "torrent":active, "resolving":state.operation.try_lock().is_err()}),
     )
+}
+async fn peer_details(State(state): State<Arc<AppState>>) -> Response {
+    let active = state.active.lock().await.clone();
+    let session = active
+        .as_ref()
+        .map(|a| format!("{}:{}", a.handle.info_hash().as_string(), a.handle.id()));
+    // Connected peers only. No history or sampling task is retained on the
+    // server; the open UI computes rates from counters and monotonic time.
+    let mut peers = active
+        .as_ref()
+        .and_then(|a| a.handle.live())
+        .map(|live| {
+            live.per_peer_stats_snapshot(Default::default())
+                .peers
+                .into_iter()
+                .take(state.config.peers as usize)
+                .map(|(address, peer)| {
+                    json!({
+                        "address":address, "client":peer.client_name,
+                        "received_bytes":peer.counters.fetched_bytes,
+                        "connections":peer.counters.connections
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    peers.sort_by(|a, b| a["address"].as_str().cmp(&b["address"].as_str()));
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "session":session, "sampled_at_ms":state.started.elapsed().as_millis(),
+            "peer_limit":state.config.peers, "peers":peers
+        })),
+    )
+        .into_response()
 }
 #[derive(Default, Deserialize)]
 struct AddRequest {

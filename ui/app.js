@@ -1,38 +1,84 @@
 const $ = (id) => document.getElementById(id);
-let lastHash = null,
-  loading = false;
+let lastHash,
+  loading = false,
+  statusBusy = false;
+let networkBusy = false,
+  networkReadBusy = false,
+  networkRevision = 0,
+  networkState = null,
+  networkKey = "";
+let dialog = null,
+  returnFocus = null;
+let peerRun = 0,
+  peerTimer = null,
+  peerAbort = null,
+  licenseRun = 0;
+const peerRates = new PeerRates();
+
 function mib(n) {
   return (n / 1048576).toFixed(1);
 }
-async function api(path, options = {}) {
-  const r = await fetch(path, options);
-  const v = await r.json();
-  if (!r.ok) throw Error(v.error || r.statusText);
-  return v;
+function size(n) {
+  if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GiB";
+  if (n >= 1048576) return mib(n) + " MiB";
+  if (n >= 1024) return (n / 1024).toFixed(1) + " KiB";
+  return n + " B";
+}
+function message(id, text) {
+  $(id).textContent = text;
+  $(id).hidden = !text;
+}
+function speedMarkup(bytes) {
+  return (((bytes || 0) * 8) / 1000000).toFixed(1) + " <span>Mbps</span>";
+}
+async function api(
+  path,
+  { timeout = 10000, signal, ...options } = {},
+  plain = false,
+) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, timeout);
+  try {
+    const response = await fetch(path, {
+      ...options,
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    const value = plain ? await response.text() : await response.json();
+    if (!response.ok) throw Error(value.error || response.statusText);
+    return value;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+function desktop(value) {
+  window.webkit?.messageHandlers?.desktop?.postMessage(value);
 }
 function busy(value) {
   loading = value;
   $("add-button").disabled = value;
   $("file-button").disabled = value;
-  $("hint").textContent = value
-    ? "Resolving torrent and finding peers…"
-    : "Video stays in RAM. Use VLC or IINA for 4K files.";
+  message("hint", value ? "Resolving torrent and finding peers…" : "");
 }
 async function add(options, path = "/api/torrents") {
   busy(true);
-  $("error").textContent = "";
+  message("error", "");
   try {
-    await api(path, options);
+    await api(path, { ...options, timeout: 100000 });
     $("link").value = "";
     await refresh();
   } catch (e) {
-    $("error").textContent = e.message;
+    message("error", e.message);
   } finally {
     busy(false);
   }
 }
-$("add").onsubmit = (e) => {
-  e.preventDefault();
+$("add").onsubmit = (event) => {
+  event.preventDefault();
   add({
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -41,41 +87,41 @@ $("add").onsubmit = (e) => {
 };
 $("file-button").onclick = () => $("upload").click();
 $("upload").onchange = async () => {
-  const f = $("upload").files[0];
-  if (!f) return;
-  if (f.size > 2097152) {
-    $("error").textContent = "Torrent metadata must be at most 2 MiB.";
+  const file = $("upload").files[0];
+  if (!file) return;
+  if (file.size > 2097152) {
+    message("error", "Torrent metadata must be at most 2 MiB.");
+    $("upload").value = "";
     return;
   }
   await add(
     {
       method: "POST",
       headers: { "Content-Type": "application/x-bittorrent" },
-      body: await f.arrayBuffer(),
+      body: await file.arrayBuffer(),
     },
     "/api/torrents/file",
   );
   $("upload").value = "";
 };
 $("stop").onclick = async () => {
+  $("stop").disabled = true;
   try {
     await api("/api/torrents", { method: "DELETE" });
+    message("error", "");
     await refresh();
   } catch (e) {
-    $("error").textContent = e.message;
+    message("error", e.message);
+  } finally {
+    $("stop").disabled = false;
   }
 };
-function desktop(message) {
-  window.webkit?.messageHandlers?.desktop?.postMessage(message);
-}
-async function copy(url, b) {
-  const original = b.textContent;
+async function copy(url, button) {
+  const original = button.textContent;
   try {
-    if (window.torrstreamDesktop) {
-      desktop({ action: "copy", text: url });
-    } else if (navigator.clipboard) {
-      await navigator.clipboard.writeText(url);
-    } else {
+    if (window.torrstreamDesktop) desktop({ action: "copy", text: url });
+    else if (navigator.clipboard) await navigator.clipboard.writeText(url);
+    else {
       const field = document.createElement("textarea");
       field.value = url;
       field.style.position = "fixed";
@@ -86,64 +132,64 @@ async function copy(url, b) {
       field.remove();
       if (!ok) throw Error("Copy unavailable");
     }
-    b.textContent = "Copied";
-    setTimeout(() => (b.textContent = original), 1600);
-  } catch (e) {
-    $("error").textContent = url;
+    button.textContent = "Copied";
+    setTimeout(() => {
+      if (button.isConnected) button.textContent = original;
+    }, 1600);
+  } catch {
+    message("error", url);
   }
 }
-let networkBusy = false,
-  networkState = null,
-  networkKey = "";
+
 function showNetwork(n) {
   networkState = n;
-  $("tv-panel").hidden = false;
+  $("tv-switch").hidden = !n.local_control;
   $("tv-enabled").checked = n.enabled;
   $("tv-enabled").disabled = !n.local_control || networkBusy;
-  $("tv-options").hidden = !n.local_control;
+  $("connection-options").hidden = !n.local_control;
+  $("remote-settings").hidden = n.local_control;
+  $("tv-apply").disabled = !n.local_control || networkBusy;
   if (document.activeElement !== $("tv-port")) $("tv-port").value = n.port;
-  $("tv-status").textContent = !n.enabled
-    ? "Turn on TV access to show the address for your TV app."
-    : n.addresses.length
-      ? "Enter this server address in your TV app."
-      : "Waiting for a home-network connection. Connect this Mac to Wi-Fi or Ethernet.";
-  $("network-error").textContent = n.errors.join("\n");
-  if (n.errors.length && !n.addresses.length)
-    $("tv-status").textContent =
-      "TV access could not start. Try another port in Connection options.";
-  const key = JSON.stringify(n.addresses);
+  const urls = n.local_control
+    ? n.addresses.map((a) => a.url)
+    : [location.origin];
+  const fallback = !n.enabled ? "TV access off" : "Waiting for home network…";
+  const key = JSON.stringify([urls, fallback]);
   if (key !== networkKey) {
     networkKey = key;
     $("tv-addresses").replaceChildren();
-    for (const a of n.addresses) {
-      const row = document.createElement("div");
-      row.className = "tv-address";
-      const text = document.createElement("div");
-      const address = document.createElement("code");
-      address.textContent = a.url;
-      const label = document.createElement("small");
-      label.textContent = "TV server address";
-      text.append(address, label);
-      const button = document.createElement("button");
-      button.textContent = "Copy address";
-      button.onclick = () => copy(a.url, button);
-      row.append(text, button);
-      $("tv-addresses").append(row);
+    for (const url of urls.length ? urls : [fallback]) {
+      const address = document.createElement("span");
+      address.textContent = url;
+      if (!urls.length) address.className = "muted";
+      $("tv-addresses").append(address);
     }
   }
+  const error = n.errors.join("\n");
+  message("network-error", error);
+  message("settings-error", error);
 }
 async function refreshNetwork() {
-  if (networkBusy) return;
+  if (networkBusy || networkReadBusy || document.hidden) return;
+  networkReadBusy = true;
+  const revision = networkRevision;
   try {
-    showNetwork(await api("/api/network"));
+    const network = await api("/api/network");
+    if (revision === networkRevision && !networkBusy) showNetwork(network);
   } catch (e) {
-    $("network-error").textContent = e.message;
+    if (revision === networkRevision && !networkBusy)
+      message("network-error", e.message);
+  } finally {
+    networkReadBusy = false;
   }
 }
 async function updateNetwork(enabled, port) {
+  if (networkBusy) return false;
+  networkRevision += 1;
   networkBusy = true;
   $("tv-enabled").disabled = true;
   $("tv-apply").disabled = true;
+  message("settings-error", "");
   try {
     const n = await api("/api/network", {
       method: "POST",
@@ -152,19 +198,30 @@ async function updateNetwork(enabled, port) {
     });
     showNetwork(n);
     desktop({ action: "saveTVSettings", enabled: n.enabled, port: n.port });
+    return n.errors.length === 0;
   } catch (e) {
-    $("network-error").textContent = e.message;
+    message("network-error", e.message);
+    message("settings-error", e.message);
     if (networkState) $("tv-enabled").checked = networkState.enabled;
+    return false;
   } finally {
     networkBusy = false;
     $("tv-enabled").disabled = !networkState?.local_control;
-    $("tv-apply").disabled = false;
+    $("tv-apply").disabled = !networkState?.local_control;
   }
 }
 $("tv-enabled").onchange = () =>
-  updateNetwork($("tv-enabled").checked, Number($("tv-port").value));
-$("tv-apply").onclick = () =>
-  updateNetwork($("tv-enabled").checked, Number($("tv-port").value));
+  updateNetwork($("tv-enabled").checked, networkState?.port || 8091);
+$("port-form").onsubmit = async (event) => {
+  event.preventDefault();
+  if (
+    await updateNetwork(
+      networkState?.enabled || false,
+      Number($("tv-port").value),
+    )
+  )
+    closeDialog();
+};
 async function initNetwork() {
   try {
     const n = await api("/api/network");
@@ -176,49 +233,51 @@ async function initNetwork() {
       );
     }
   } catch (e) {
-    $("network-error").textContent = e.message;
+    message("network-error", e.message);
   }
 }
-initNetwork();
-setInterval(refreshNetwork, 3000);
-function files(t) {
-  const hash = t?.hash || null;
+
+function files(torrent) {
+  $("stop").hidden = !torrent;
+  $("torrent-name").textContent = torrent ? torrent.title : "Ready to stream";
+  $("file-count").textContent = torrent
+    ? torrent.file_stats.length +
+      (torrent.file_stats.length === 1 ? " file" : " files")
+    : "";
+  const hash = torrent?.hash || null;
   if (hash === lastHash) return;
   lastHash = hash;
   $("files").replaceChildren();
-  $("stop").hidden = !t;
-  $("torrent-name").textContent = t ? t.title : "Ready to stream";
-  if (!t) {
-    const e = document.createElement("div");
-    e.className = "empty";
-    e.textContent = "Add a torrent, then open a file in your player.";
-    $("files").append(e);
+  if (!torrent) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Add a magnet link or open a .torrent file.";
+    $("files").append(empty);
     return;
   }
-  for (const f of t.file_stats) {
+  for (const file of torrent.file_stats) {
     const row = document.createElement("div");
     row.className = "file";
     const name = document.createElement("div");
     name.className = "file-name";
-    name.textContent = f.path;
-    const size = document.createElement("small");
-    size.textContent = (f.length / 1073741824).toFixed(2) + " GiB";
-    name.append(size);
+    name.textContent = file.path;
+    const length = document.createElement("small");
+    length.textContent = size(file.length);
+    name.append(length);
     const actions = document.createElement("div");
     actions.className = "file-actions";
     const url =
       location.origin +
       "/stream?link=" +
-      encodeURIComponent(t.hash) +
+      encodeURIComponent(torrent.hash) +
       "&index=" +
-      f.id +
+      file.id +
       "&play";
     const cp = document.createElement("button");
-    cp.className = "secondary";
     cp.textContent = "Copy stream URL";
     cp.onclick = () => copy(url, cp);
     const play = document.createElement("a");
-    play.className = "button";
+    play.className = "button primary";
     play.textContent = window.torrstreamDesktop
       ? "Open in player"
       : "Open in VLC";
@@ -231,6 +290,8 @@ function files(t) {
   }
 }
 async function refresh() {
+  if (statusBusy || document.hidden) return;
+  statusBusy = true;
   try {
     const s = await api("/api/status");
     $("rss").innerHTML =
@@ -240,34 +301,209 @@ async function refresh() {
       " <span>/ " +
       mib(s.cache.budget_bytes) +
       " MiB</span>";
-    $("cache-detail").textContent =
-      s.cache.cached_pieces + " pieces · " + s.cache.evictions + " evictions";
+    $("cache-pieces").textContent = s.cache.cached_pieces;
+    $("cache-evictions").textContent = s.cache.evictions;
+    $("cache-piece-size").textContent = s.cache.piece_bytes
+      ? size(s.cache.piece_bytes)
+      : "—";
     $("meter").style.width =
-      (100 * s.cache.reserved_bytes) / s.cache.budget_bytes + "%";
-    const live = s.torrent?.engine?.live;
-    $("speed").innerHTML =
-      ((live?.download_speed?.mbps || 0) * 8.388608).toFixed(1) +
-      " <span>Mbps</span>";
-    $("peers").textContent = s.torrent
-      ? s.torrent.active_readers +
-        " active requests · peer limit " +
-        s.peer_limit
-      : "No torrent loaded";
+      Math.min(100, (100 * s.cache.reserved_bytes) / s.cache.budget_bytes) +
+      "%";
+    $("speed").innerHTML = speedMarkup(s.torrent?.download_speed);
+    $("peer-total").innerHTML = speedMarkup(s.torrent?.download_speed);
+    const count = s.torrent?.active_peers || 0;
+    $("peers").textContent = count
+      ? count + (count === 1 ? " connected peer" : " connected peers")
+      : "No active peers";
+    $("app-version").textContent = s.version;
     $("footer-status").textContent =
-      "TorrStream Lite " +
-      s.version +
-      " · " +
-      (loading || s.resolving
+      loading || s.resolving
         ? "Resolving…"
-        : s.torrent
-          ? "Ready for playback"
-          : "Idle");
+        : !s.torrent
+          ? "Idle"
+          : s.torrent.stat === 2
+            ? "Buffering…"
+            : s.torrent.active_readers
+              ? "Streaming"
+              : "Ready for playback";
     files(s.torrent);
-    if (s.torrent?.engine?.error)
-      $("error").textContent = s.torrent.engine.error;
+    if (s.torrent?.engine?.error) message("error", s.torrent.engine.error);
   } catch (e) {
     $("footer-status").textContent = "Server unavailable: " + e.message;
+    if (dialog === "peers") {
+      peerRates.reset();
+      message("peer-error", "Server unavailable");
+    }
+  } finally {
+    statusBusy = false;
   }
 }
+
+function stopPeerUpdates() {
+  peerRun += 1;
+  clearTimeout(peerTimer);
+  peerTimer = null;
+  peerAbort?.abort();
+  peerAbort = null;
+  peerRates.reset();
+}
+function startPeerUpdates() {
+  stopPeerUpdates();
+  $("peer-rows").replaceChildren();
+  $("peer-table").hidden = true;
+  $("peer-empty").textContent = "Loading peers…";
+  $("peer-empty").hidden = false;
+  message("peer-error", "");
+  if (!document.hidden) readPeers(peerRun);
+}
+async function readPeers(run) {
+  const controller = new AbortController();
+  peerAbort = controller;
+  try {
+    const sample = await api("/api/peers", { signal: controller.signal });
+    if (run !== peerRun || dialog !== "peers") return;
+    const peers = peerRates.sample(sample);
+    $("peer-summary").textContent =
+      peers.length + " connected · limit " + sample.peer_limit;
+    const rows = document.createDocumentFragment();
+    for (const peer of peers) {
+      const row = document.createElement("tr");
+      const address = document.createElement("td");
+      address.textContent = peer.address;
+      const client = document.createElement("small");
+      client.textContent = peer.client || "Unknown client";
+      address.append(client);
+      const rate = document.createElement("td");
+      rate.textContent =
+        peer.download_bps === null
+          ? "Measuring…"
+          : ((peer.download_bps * 8) / 1000000).toFixed(1) + " Mbps";
+      const received = document.createElement("td");
+      received.textContent = size(peer.received_bytes);
+      row.append(address, rate, received);
+      rows.append(row);
+    }
+    $("peer-rows").replaceChildren(rows);
+    $("peer-table").hidden = peers.length === 0;
+    $("peer-empty").hidden = peers.length !== 0;
+    $("peer-empty").textContent = sample.session
+      ? "Waiting for connected peers…"
+      : "No torrent loaded.";
+    message("peer-error", "");
+  } catch (e) {
+    if (run !== peerRun || dialog !== "peers") return;
+    peerRates.reset();
+    $("peer-rows").replaceChildren();
+    $("peer-table").hidden = true;
+    message("peer-error", "Could not update peers: " + e.message);
+    $("peer-empty").hidden = true;
+  } finally {
+    if (run === peerRun) {
+      peerAbort = null;
+      if (dialog === "peers" && !document.hidden)
+        peerTimer = setTimeout(() => readPeers(run), 1500);
+    }
+  }
+}
+function openDialog(name, trigger) {
+  stopPeerUpdates();
+  if (trigger) returnFocus = trigger;
+  dialog = name;
+  $("overlay").hidden = false;
+  for (const type of ["settings", "peers", "license"])
+    $(type + "-dialog").hidden = type !== name;
+  $("app").inert = true;
+  $("app").setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "hidden";
+  $("peers-button").setAttribute("aria-expanded", String(name === "peers"));
+  $(name + "-dialog")
+    .querySelector("button")
+    .focus();
+  if (name === "peers") startPeerUpdates();
+}
+function closeDialog() {
+  stopPeerUpdates();
+  licenseRun += 1;
+  dialog = null;
+  $("overlay").hidden = true;
+  for (const type of ["settings", "peers", "license"])
+    $(type + "-dialog").hidden = true;
+  $("app").inert = false;
+  $("app").removeAttribute("aria-hidden");
+  document.body.style.overflow = "";
+  $("peers-button").setAttribute("aria-expanded", "false");
+  $("peer-rows").replaceChildren();
+  returnFocus?.focus();
+}
+$("settings-button").onclick = (event) =>
+  openDialog("settings", event.currentTarget);
+$("peers-button").onclick = (event) => openDialog("peers", event.currentTarget);
+window.torrstreamOpenSettings = () =>
+  openDialog("settings", $("settings-button"));
+$("license-back").onclick = () => {
+  licenseRun += 1;
+  openDialog("settings");
+};
+document.querySelectorAll("[data-close-dialog]").forEach((button) => {
+  button.onclick = closeDialog;
+});
+$("overlay").onclick = (event) => {
+  if (event.target === $("overlay")) closeDialog();
+};
+document.addEventListener("keydown", (event) => {
+  if (!dialog) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeDialog();
+  }
+  if (event.key === "Tab" && dialog) {
+    const controls = [
+      ...$(dialog + "-dialog").querySelectorAll("button,input,a[href],summary"),
+    ].filter((el) => !el.disabled && el.getClientRects().length);
+    const first = controls[0],
+      last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+});
+document.querySelectorAll("[data-license]").forEach((button) => {
+  button.onclick = async () => {
+    const type = button.dataset.license,
+      run = ++licenseRun;
+    $("license-title").textContent =
+      type === "app" ? "MIT license" : "Third-party notices";
+    $("license-text").textContent = "Loading…";
+    openDialog("license");
+    try {
+      const text = await api("/licenses/" + type, {}, true);
+      if (run === licenseRun) $("license-text").textContent = text;
+    } catch (e) {
+      if (run === licenseRun) $("license-text").textContent = e.message;
+    }
+  };
+});
+document.querySelectorAll("a[data-external]").forEach((link) => {
+  link.onclick = (event) => {
+    if (window.torrstreamDesktop) {
+      event.preventDefault();
+      desktop({ action: "openExternal", url: link.href });
+    }
+  };
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopPeerUpdates();
+  else {
+    refresh();
+    refreshNetwork();
+    if (dialog === "peers") startPeerUpdates();
+  }
+});
+initNetwork();
 refresh();
+setInterval(refreshNetwork, 3000);
 setInterval(refresh, 1500);

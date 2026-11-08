@@ -26,6 +26,7 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: python3 tests/release.py
+      - run: node tests/peer-rates.cjs
       - run: cargo build --locked
       - run: python3 tests/e2e.py --binary target/debug/torrstream-lite --size-mib 32 --corrupt-first
       - run: python3 tests/lampa.py --binary target/debug/torrstream-lite
