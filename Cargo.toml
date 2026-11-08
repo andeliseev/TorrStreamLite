@@ -1,0 +1,36 @@
+[package]
+name = "torrstream-lite"
+version = "0.2.1"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+description = "A bounded-RAM torrent streaming server for Keenetic and macOS"
+
+[workspace]
+exclude = ["vendor/rqbit"]
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+libc = "0.2"
+memmap2 = "0.9"
+librqbit = { path = "vendor/rqbit/crates/librqbit", default-features = false, features = ["rust-tls", "disable-upload"] }
+librqbit-core = { path = "vendor/rqbit/crates/librqbit_core", default-features = false }
+parking_lot = "0.12"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "io-util", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

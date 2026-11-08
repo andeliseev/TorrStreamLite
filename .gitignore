@@ -1,0 +1,9 @@
+/.build/
+/target/
+/dist/
+.DS_Store
+/test-results/
+__pycache__/
+*.py[cod]
+
+/release-assets/

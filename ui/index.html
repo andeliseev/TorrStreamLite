@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>TorrStream Lite</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>
+            TorrStream
+            <span>Lite</span>
+          </h1>
+          <small>One stream. A bounded memory cache.</small>
+        </div>
+        <span class="badge">RAM ONLY</span>
+      </header>
+      <section class="metrics">
+        <div class="metric">
+          <small>SERVER MEMORY</small>
+          <div class="number" id="rss">—</div>
+          <small>Resident memory of the streaming server</small>
+        </div>
+        <div class="metric">
+          <small>CACHE RESERVED</small>
+          <div class="number" id="cache">—</div>
+          <small id="cache-detail">Waiting for server</small>
+          <div class="meter"><div id="meter"></div></div>
+        </div>
+        <div class="metric">
+          <small>DOWNLOAD SPEED</small>
+          <div class="number" id="speed">—</div>
+          <small id="peers">No torrent loaded</small>
+        </div>
+      </section>
+      <section class="panel" id="tv-panel" hidden>
+        <div class="tv-heading">
+          <h2>Watch on TV</h2>
+          <label class="switch">
+            <input type="checkbox" id="tv-enabled" />
+            Allow TV access
+          </label>
+        </div>
+        <p class="network-note" id="tv-status">Checking your home network…</p>
+        <div id="tv-addresses"></div>
+        <p id="network-error" role="alert"></p>
+        <details class="network-options" id="tv-options">
+          <summary>Connection options</summary>
+          <div class="row">
+            <label for="tv-port">TV port</label>
+            <input
+              type="number"
+              id="tv-port"
+              min="1024"
+              max="65535"
+              value="8091"
+            />
+            <button id="tv-apply" class="secondary">Apply port</button>
+          </div>
+          <p class="network-note">
+            Keep this Mac awake and connect the TV to the same home network.
+            Devices on this network can control playback while TV access is on.
+          </p>
+        </details>
+      </section>
+      <section class="panel">
+        <h2>Add a torrent</h2>
+        <form id="add">
+          <div class="row">
+            <input
+              id="link"
+              aria-label="Magnet or torrent URL"
+              placeholder="Paste a magnet link or .torrent URL"
+              required
+            />
+            <button id="add-button">Add torrent</button>
+            <button type="button" class="secondary" id="file-button">
+              Open .torrent
+            </button>
+            <input id="upload" type="file" accept=".torrent" />
+          </div>
+        </form>
+        <div id="hint">Video stays in RAM. Use VLC or IINA for 4K files.</div>
+        <div id="error" role="alert"></div>
+      </section>
+      <section class="panel">
+        <div class="row" style="justify-content: space-between">
+          <h2 id="torrent-name">Ready to stream</h2>
+          <button id="stop" class="stop" hidden>Stop & release RAM</button>
+        </div>
+        <div id="files">
+          <div class="empty">
+            Add a torrent, then open a file in your player.
+          </div>
+        </div>
+      </section>
+      <div class="footer">
+        The cache is a hard limit on video buffers, not on total process memory.
+        Mac window and player memory are separate.
+        <br />
+        <span id="footer-status">Connecting…</span>
+      </div>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
