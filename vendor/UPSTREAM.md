@@ -17,6 +17,8 @@ Local changes supporting bounded RAM streaming:
 - `session.rs`: in RAM mode, trackers hear the torrent's size less what's cached as what's left, never 0, so they don't take us for a seeder.
 - `dht_utils.rs`: metadata connection concurrency 4 and candidate limit 256.
 - `peer_info_reader/mod.rs`: metadata size limit 2 MiB and zero-size rejection.
+- `peer_connection.rs`, `read_buf.rs`: a handler can let a quiet peer stay connected: between messages, a read that times out is tried again while `may_stay_quiet()` holds (a message cut short still times out). In RAM mode that's a peer that has sent its bitfield, has unchoked us and owes us no chunks. The read timeout dropped every seeder once a reader's window was cached, and the reconnect backoff left a seek with no one to download from.
+- `session.rs`, `torrent_state/mod.rs`, `torrent_state/live/mod.rs`: peer connections get the session's keep-alive interval. Upstream leaves it out of the per-torrent options, so peers got the 120 s default.
 
 A test fix: in `tests/fake_peer.rs`, `test_fake_peer_downloads_a_block_from_a_seeder` waits for the seeder's upload counter. The seeder updates it when its write returns, which can be after the peer has read the block, so the test failed now and then on Linux.
 

@@ -152,10 +152,23 @@ impl ReadBuf {
     }
 
     /// Read a message into the buffer, try to deserialize it and call the callback on it.
+    #[cfg(test)]
     pub async fn read_message(
         &mut self,
         conn: &mut BoxAsyncReadVectored,
         timeout: Duration,
+    ) -> Result<Message<'_>> {
+        self.read_message_or_wait(conn, timeout, || false).await
+    }
+
+    /// Reads a message, like `read_message`, but between messages a read that times out is
+    /// tried again for as long as `quiet_is_fine()`: a peer that was asked for nothing may have
+    /// nothing to say. A message cut short still times out.
+    pub async fn read_message_or_wait(
+        &mut self,
+        conn: &mut BoxAsyncReadVectored,
+        timeout: Duration,
+        quiet_is_fine: impl Fn() -> bool,
     ) -> Result<Message<'_>> {
         loop {
             let err = {
@@ -192,13 +205,21 @@ impl ReadBuf {
                                 need_additional_bytes: need_additional_bytes as u16,
                             });
                         }
-                        let size = with_timeout(
-                            "reading",
-                            timeout,
-                            conn.read_vectored(&mut self.unfilled_ioslices())
-                                .map_err(Error::Write),
-                        )
-                        .await?;
+                        // Reads are poll-based, so one that timed out took nothing and can
+                        // be started again.
+                        let size = loop {
+                            match with_timeout(
+                                "reading",
+                                timeout,
+                                conn.read_vectored(&mut self.unfilled_ioslices())
+                                    .map_err(Error::Write),
+                            )
+                            .await
+                            {
+                                Err(Error::Timeout(_)) if self.len == 0 && quiet_is_fine() => {}
+                                r => break r?,
+                            }
+                        };
                         if size == 0 {
                             return Err(Error::PeerDisconnected);
                         }
@@ -413,6 +434,58 @@ mod tests {
             matches!(err, crate::Error::PeerDisconnectedReadingHandshake),
             "{err:?}"
         );
+    }
+
+    /// Reads a message with a 100 ms timeout from a peer that writes each of `chunks` after
+    /// 300 ms without a byte. True for a keep-alive.
+    async fn read_after_quiet(chunks: Vec<Vec<u8>>, quiet_is_fine: bool) -> crate::Result<bool> {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let writer = async move {
+            let mut w = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                .await
+                .unwrap();
+            w.set_nodelay(true).unwrap();
+            for c in chunks {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                w.write_all(&c).await.unwrap();
+                w.flush().await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+        let reader = async {
+            let reader = listener.accept().await.unwrap().0.into_split().0;
+            let mut reader: BoxAsyncReadVectored = Box::new(reader);
+            let mut rb = ReadBuf::new();
+            rb.read_message_or_wait(&mut reader, Duration::from_millis(100), || quiet_is_fine)
+                .await
+                .map(|m| matches!(m, Message::KeepAlive))
+        };
+        let (r, ()) = tokio::join!(reader, writer);
+        r
+    }
+
+    #[tokio::test]
+    async fn a_quiet_peer_is_waited_for_only_between_messages_and_when_allowed() {
+        setup_test_logging();
+        let keep_alive = vec![0u8; 4];
+        assert!(
+            read_after_quiet(vec![keep_alive.clone()], true)
+                .await
+                .unwrap()
+        );
+
+        let err = read_after_quiet(vec![keep_alive.clone()], false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::Timeout(_)), "{err:?}");
+
+        // Half a message, then nothing: the peer stalled.
+        let halves = vec![keep_alive[..2].to_vec(), keep_alive[2..].to_vec()];
+        let err = read_after_quiet(halves, true).await.unwrap_err();
+        assert!(matches!(err, crate::Error::Timeout(_)), "{err:?}");
     }
 
     #[tokio::test]

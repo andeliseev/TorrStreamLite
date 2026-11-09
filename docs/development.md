@@ -77,6 +77,7 @@ The local peer speaks the real BitTorrent protocol and never contacts public swa
 - Backward and forward seeks, suffix ranges, overlapping head and tail requests, and pieces that span files
 - Magnet metadata exchange, rejecting and recovering from a corrupted piece, and bounded allocation
 - A second peer that unchokes the engine and then answers nothing, as a peer that chokes it mid-piece does: the other peer takes over its pieces, and no read waits 15 s or more
+- A paused player with a full cache, so peers have nothing to send for longer than the 15 s read timeout: they stay connected, and the next seek starts at once. The test peers drop a connection that stays silent for 12 s, as real ones do after a few minutes, so this also checks the engine's keep-alives
 - Twelve peers limited to 10 Mbps each: they all send at once, faster than four could
 - One torrent at a time, invalid ranges, and HEAD requests that download nothing
 - Stop during a slow HTTP response, cache teardown, and no files written by the server

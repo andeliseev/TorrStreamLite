@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+- Fixed seeks that took a long time or never started after a pause, or once the cache had filled. The app disconnected peers that had nothing to send yet, and a seek then waited, sometimes minutes, for them to be tried again.
+
 ## 0.2.6 (2026-11-09)
 
 - Fixed Lampa's HASH error the first time you opened a torrent. Opening another torrent on the TV now replaces the one that's loaded, and Lampa no longer gives up after 30 seconds on a magnet link that's slow to load.

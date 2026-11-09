@@ -55,6 +55,12 @@ pub trait PeerConnectionHandler {
     fn client_name_and_version(&self) -> &str {
         crate::client_name_and_version()
     }
+    /// True while a quiet peer is not a dead one, so the read timeout doesn't apply between
+    /// messages: we asked it for nothing, and a seeder with nothing to answer sends only a
+    /// keep-alive every couple of minutes.
+    fn may_stay_quiet(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -477,7 +483,9 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
 
         let reader = async move {
             loop {
-                let message = read_buf.read_message(&mut read, rwtimeout).await?;
+                let message = read_buf
+                    .read_message_or_wait(&mut read, rwtimeout, || self.handler.may_stay_quiet())
+                    .await?;
                 trace!("received: {:?}", &message);
 
                 tokio::task::yield_now().await;

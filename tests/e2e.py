@@ -2,7 +2,8 @@
 """Real BitTorrent -> RAM -> HTTP integration test. Generates data in memory.
 
 No public swarm is contacted. Exercises metadata exchange, hash verification,
-cross-file pieces, eviction, seeks, overlapping readers and cache teardown.
+cross-file pieces, eviction, seeks, overlapping readers, peers kept while a player
+is paused, and cache teardown.
 """
 import argparse
 import concurrent.futures
@@ -82,7 +83,10 @@ class Swarm:
         swarm = self
         class Peer(socketserver.BaseRequestHandler):
             def handle(self):
-                s=self.request; s.settimeout(30)
+                # Like a real peer, it drops a connection that stays silent: they wait a few
+                # minutes, this one 12 s, less than the paused-player check waits, which so
+                # also checks the engine's keep-alives.
+                s=self.request; s.settimeout(12)
                 def send(data): s.sendall(struct.pack('!I',len(data))+data)
                 try:
                     handshake=recv_exact(s,68)
@@ -105,9 +109,11 @@ class Swarm:
                                     data=bytes([data[0]^255])+data[1:]; swarm.corrupted=True
                                 swarm.bytes_served+=length
                             if rate:
-                                # A steady limit: time spent idle doesn't build up a burst.
-                                ready=max(ready,time.monotonic())
-                                time.sleep(ready-time.monotonic()) if ready>time.monotonic() else None
+                                # A steady limit: time spent idle doesn't build up a burst. One
+                                # reading of the clock: with two, the delay could come out
+                                # negative, and the peer crashed and dropped the connection.
+                                now=time.monotonic(); ready=max(ready,now)
+                                if ready>now: time.sleep(ready-now)
                                 ready+=length/rate
                             send(b'\x07'+struct.pack('!II',piece,off)+data)
                         elif msg[0]==20:
@@ -266,6 +272,21 @@ def main():
                 futures=[pool.submit(read_range,offset,3*PIECE+101) for offset in [0,swarm.movie_size-5*PIECE]]
                 for f in futures: f.result(timeout=65)
             mark('overlapping head/tail readers')
+            # A paused player: the read-ahead fills the cache, so the peers have nothing to
+            # send for longer than the 15 s peer read timeout. Dropped, they wait 10 s or
+            # more before they're tried again, and a seek finds no one to download from.
+            def connections():
+                peers=js('/api/peers')['peers']
+                return len(peers), sum(p['connections'] for p in peers)
+            held=request('/api/stream/2'); held.read(1024)
+            time.sleep(1)
+            before=connections()
+            time.sleep(17)
+            assert connections()==before, f'Quiet peers were dropped: (peers, connections) {before}, then {connections()}'
+            held.close()
+            waited=read_range(swarm.movie_size//2+77,PIECE+5)
+            assert waited<8, f'A seek after a pause took {waited:.1f} s'
+            mark('quiet peers stay connected while a player is paused, so a seek starts at once')
             read_range(PIECE+11,PIECE+13,f'/stream?link={t["hash"]}&index=2&play')
             with request(f'/stream?link={t["hash"]}&m3u') as r: assert b'index=2&play' in r.read()
             listed=js('/torrents',method='POST',data=b'{"action":"list"}',headers={'Content-Type':'application/json'})

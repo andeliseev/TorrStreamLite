@@ -12,6 +12,10 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 - [ ] Reserving a slot zeroes the whole piece (up to 32 MiB) under the engine's lock, and each eviction walks every file to update per-file counters
 - [ ] Eviction still looks at every cached piece to find the oldest one it may drop: 6,144 of them with 16 KiB pieces. It's no longer the limit (143 MiB/s, with 3.5 s of server CPU for 384 MiB on an Apple Silicon Mac), so only the router might need better
+- [ ] The piece a player waits for downloads from one peer at a time, and nothing plays until all of it is checked. With the 8 MiB pieces common for films and peers at 1–2 MB/s, a seek waits 4–8 s. Fetch it from several peers at once, or read its chunks before the piece is checked, as TorrServer does
+- [ ] A peer that drops mid-piece loses what it sent: `release_pieces_owned_by` clears the piece's chunks, even in RAM mode where the slot and its data stay. Keep them, as for a piece taken over
+- [ ] 16 outstanding requests per peer cap each peer at 256 KiB per round trip: about 2.5 MB/s at 100 ms, as through a VPN. Size the window from each peer's rate
+- [ ] A seek doesn't retry peers that are waiting out their reconnect backoff (10 s, then a minute, then six) after a real disconnect
 
 ## Security
 
@@ -47,6 +51,7 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 - [ ] Unit tests for the compatibility routes in `server.rs` (`origin_allowed`, the Host check and the cross-site rule have them)
 - [ ] An engine error banner stays after the torrent recovers, until it's dismissed
 - [ ] `stream_file` wraps its channel receiver with the `async-stream` crate; `futures::stream::poll_fn` would do it without the extra dependency
+- [ ] `cargo clippy -- -D warnings` in `vendor/rqbit` stops on four casts in `piece_tracker.rs` and `torrent_state/streaming.rs`; CI doesn't lint the engine
 
 ## Release and tests
 

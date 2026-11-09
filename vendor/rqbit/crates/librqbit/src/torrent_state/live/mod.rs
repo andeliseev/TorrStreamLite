@@ -542,6 +542,7 @@ impl TorrentStateLive {
         let options = PeerConnectionOptions {
             connect_timeout: self.shared.options.peer_connect_timeout,
             read_write_timeout: self.shared.options.peer_read_write_timeout,
+            keep_alive_interval: self.shared.options.peer_keep_alive_interval,
             ..Default::default()
         };
         let peer_connection = PeerConnection::new(
@@ -607,6 +608,7 @@ impl TorrentStateLive {
         let options = PeerConnectionOptions {
             connect_timeout: state.shared.options.peer_connect_timeout,
             read_write_timeout: state.shared.options.peer_read_write_timeout,
+            keep_alive_interval: state.shared.options.peer_keep_alive_interval,
             ..Default::default()
         };
         let peer_connection = PeerConnection::new(
@@ -1314,6 +1316,23 @@ impl PeerConnectionHandler for &'_ PeerHandler {
 
     fn client_name_and_version(&self) -> &str {
         &self.client_name_and_version
+    }
+
+    /// A stream's read-ahead fills the RAM cache and then waits for the player, so peers
+    /// often have nothing to send. Dropping them for that backed them off for 10 s, then
+    /// a minute, then six, and a seek found no one to download from. A peer that has told
+    /// us what it has, lets us download, and owes us no chunks may stay quiet. One that
+    /// keeps us choked still goes, so it doesn't hold a peer slot.
+    fn may_stay_quiet(&self) -> bool {
+        self.state.files.ram_cache_slots().is_some()
+            && !self.is_choked()
+            && self
+                .state
+                .peers
+                .with_live(self.addr, |live| {
+                    !live.bitfield.is_empty() && live.requested_inflight_count() == 0
+                })
+                .unwrap_or(false)
     }
 }
 
