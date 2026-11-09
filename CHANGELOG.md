@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+## 0.2.6 (2026-11-09)
+
 - Fixed Lampa's HASH error the first time you opened a torrent. Opening another torrent on the TV now replaces the one that's loaded, and Lampa no longer gives up after 30 seconds on a magnet link that's slow to load.
 
 ## 0.2.5 (2026-11-09)
