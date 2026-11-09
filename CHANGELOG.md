@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+## 0.2.9 (2026-11-09)
+
 - Magnet links load faster, and some that timed out now load: the app asks 16 peers for a torrent's details at once instead of 4. Most peers in a swarm never answer, and waiting for them four at a time could use up all the time allowed.
 - When a magnet link doesn't load, the window also says what the torrent's tracker answered. If the tracker no longer has the torrent ("Torrent not registered"), it was removed there or replaced with a newer one, and the window says to look for it again. It no longer points at a VPN when peers simply don't answer.
 - Some trackers could give the app fewer peers for a magnet link: until the torrent's details arrived, the app told them it had nothing left to download, which looks like a seeder, and many trackers don't send seeders to seeders. It now reports an unfinished download from the start.
