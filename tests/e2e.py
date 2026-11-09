@@ -62,8 +62,9 @@ def recv_exact(sock, n):
     return bytes(out)
 
 class Swarm:
-    def __init__(self, size_mib, corrupt=False, source=None, stalling_peer=False, peers=1, peer_mbps=0):
+    def __init__(self, size_mib, corrupt=False, source=None, stalling_peer=False, peers=1, peer_mbps=0, metadata_delay=0):
         self.source = Path(source) if source else None
+        self.metadata_delay = metadata_delay  # seconds before each answer to a magnet link's metadata request
         self.prefix = 0 if source else PIECE + 123
         self.movie_size = self.source.stat().st_size if source else size_mib * 1024 * 1024
         self.total = self.prefix + self.movie_size
@@ -113,6 +114,7 @@ class Swarm:
                             value, used=bdecode(msg[2:])
                             if msg[1]==0: meta_id=value.get(b'm',{}).get(b'ut_metadata',1)
                             elif value.get(b'msg_type')==0:
+                                time.sleep(swarm.metadata_delay)
                                 i=value[b'piece']; part=swarm.info[i*BLOCK:(i+1)*BLOCK]
                                 send(bytes([20,meta_id])+bencode({b'msg_type':1,b'piece':i,b'total_size':len(swarm.info)})+part)
                 except (EOFError, OSError, ValueError): pass

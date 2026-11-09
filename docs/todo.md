@@ -21,7 +21,7 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 ## App and UI
 
 - [ ] An optional password for home network access (**Allow other devices**). Lampa supports TorrServer's login and password, and it would also keep web pages open on other devices away from the TV address
-- [ ] Cancel while a magnet is resolving. The server holds its add/stop lock for up to 90 s, so Stop can't interrupt it
+- [ ] Cancel while a magnet link added in the window is resolving. Lampa's adds resolve in the background and Stop cancels them, but the window's own add holds the add/stop lock for up to 90 s, so Stop can't interrupt it
 - [ ] Check the transparent titlebar by hand, on macOS 26 and an older version: the window buttons over the sidebar, dragging by the top band, double-click to zoom
 - [ ] Open .torrent files and magnet links from Finder and browsers (document types and a URL scheme in `Info.plist`)
 - [ ] Choose the player; today VLC is tried first, then IINA

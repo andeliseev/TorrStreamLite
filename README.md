@@ -88,7 +88,7 @@ Read the full [privacy policy](https://andeliseev.github.io/torrstream-lite/priv
 
 ## What it doesn't do
 
-- **Play several torrents at once.** One torrent runs at a time, with the whole cache to itself.
+- **Play several torrents at once.** One torrent runs at a time, with the whole cache to itself. Opening another torrent in Lampa replaces the one that's loaded.
 - **Convert video.** Files play as they are, so your player must support their format. VLC and IINA play almost anything.
 - **Upload to other peers (seed).** It only downloads, so it doesn't help others finish the torrent, and it doesn't suit private trackers that require you to upload.
 - **Search for torrents.** Bring a magnet link or a .torrent file, or search in Lampa.

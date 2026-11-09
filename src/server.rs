@@ -24,7 +24,7 @@ use std::{
 };
 use tokio::{
     io::AsyncReadExt,
-    sync::{Mutex, Semaphore},
+    sync::{Mutex, OwnedMutexGuard, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +35,11 @@ pub struct AppState {
     pub factory: RamFactory,
     pub config: Config,
     pub active: Mutex<Option<Active>>,
-    pub operation: Mutex<()>,
+    /// Held while a torrent is added or stopped, including by the task that resolves a
+    /// magnet link Lampa added.
+    pub operation: Arc<Mutex<()>>,
+    /// The torrent Lampa added by magnet link while its details are on the way.
+    pub pending: parking_lot::Mutex<Option<Pending>>,
     pub started: Instant,
     pub client: reqwest::Client,
     pub tv: Mutex<crate::network::TvAccess>,
@@ -59,6 +63,16 @@ pub struct Active {
     preload: Arc<parking_lot::Mutex<Option<Arc<Preload>>>>,
     /// The link it was added with; none for a .torrent file.
     link: Option<String>,
+}
+pub struct Pending {
+    hash: String,
+    link: String,
+    title: String,
+    poster: String,
+    category: String,
+    data: String,
+    timestamp: u64,
+    cancel: CancellationToken,
 }
 struct Preload {
     file: usize,
@@ -109,13 +123,18 @@ fn now() -> u64 {
 fn conflict(s: &str) -> ApiError {
     ApiError(StatusCode::CONFLICT, s.into())
 }
+fn busy() -> ApiError {
+    conflict("Another add/stop operation is running")
+}
 
+fn magnet_hash(link: &str) -> Option<String> {
+    librqbit::Magnet::parse(link)
+        .ok()
+        .and_then(|m| m.as_id20())
+        .map(|id| id.as_string())
+}
 fn link_matches(link: &str, hash: &str) -> bool {
-    link.eq_ignore_ascii_case(hash)
-        || librqbit::Magnet::parse(link)
-            .ok()
-            .and_then(|m| m.as_id20())
-            .is_some_and(|id| id.as_string() == hash)
+    link.eq_ignore_ascii_case(hash) || magnet_hash(link).is_some_and(|h| h == hash)
 }
 
 /// `lan` is true for listeners that face the home network: TV access, or `--listen`
@@ -457,6 +476,12 @@ fn active_json(a: &Active) -> Value {
         "total_peers":peers.map_or(0, |p| p.live + p.queued + p.connecting),
         "file_stats":files_json(a), "active_readers":active_readers(a)})
 }
+/// A torrent whose details are on the way, in TorrServer's shape. Without a file list,
+/// Lampa keeps asking.
+fn pending_json(p: &Pending) -> Value {
+    json!({"title":p.title, "hash":p.hash, "poster":p.poster, "category":p.category,
+        "data":p.data, "timestamp":p.timestamp, "stat":1, "stat_string":"Torrent getting info"})
+}
 
 /// What the control page needs every 1.5 s. The file list, up to 4,096 paths, comes once per
 /// torrent from `/api/files`.
@@ -607,10 +632,7 @@ async fn input_from_link(state: &AppState, link: &str) -> Result<AddTorrent<'sta
     Ok(AddTorrent::TorrentFileBytes(data.into()))
 }
 async fn add(state: &Arc<AppState>, req: AddRequest, bytes: Option<Bytes>) -> ApiResult<Value> {
-    let _op = state
-        .operation
-        .try_lock()
-        .map_err(|_| conflict("Another add/stop operation is running"))?;
+    let _op = state.operation.try_lock().map_err(|_| busy())?;
     if let Some(a) = state.active.lock().await.as_ref() {
         let hash = a.handle.info_hash().as_string();
         if link_matches(&req.link, &hash) {
@@ -632,6 +654,89 @@ async fn add(state: &Arc<AppState>, req: AddRequest, bytes: Option<Bytes>) -> Ap
         (Some(b), _) => AddTorrent::TorrentFileBytes(b),
         (None, link) => input_from_link(state, link.as_deref().unwrap_or_default()).await?,
     };
+    let active = start_torrent(state, input, link, req).await?;
+    Ok(load(state, active).await)
+}
+/// Lampa gives "add" 30 s, then asks "get" every 2 s until the file list is there, because
+/// TorrServer answers at once and resolves a magnet link in the background. Do the same.
+/// Lampa also adds the next torrent before it drops the last; only one fits in the cache,
+/// so the new one replaces it.
+async fn add_from_lampa(state: &Arc<AppState>, req: AddRequest) -> ApiResult<Value> {
+    let link = resume_link(&state.resume.lock(), &req.link);
+    if let Some(value) = loaded(state, &link).await {
+        return Ok(value);
+    }
+    // Read the link before letting go of the torrent that's loaded.
+    let input = input_from_link(state, &link).await?;
+    let op = lock_cancelling(state, true).await?;
+    release(state, true).await?;
+    if state.factory.is_occupied() {
+        return Err(conflict(
+            "Previous torrent is still releasing memory; retry shortly",
+        ));
+    }
+    let Some(hash) = magnet_hash(&link) else {
+        // A .torrent file comes with its details.
+        let active = start_torrent(state, input, Some(link), req).await?;
+        return Ok(load(state, active).await);
+    };
+    let cancel = CancellationToken::new();
+    let pending = Pending {
+        hash: hash.clone(),
+        link: link.clone(),
+        title: req.title.clone(),
+        poster: req.poster.clone(),
+        category: req.category.clone(),
+        data: req.data.clone(),
+        timestamp: now(),
+        cancel: cancel.clone(),
+    };
+    let value = pending_json(&pending);
+    *state.pending.lock() = Some(pending);
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _op = op;
+        tokio::select! {
+            result = start_torrent(&state, input, Some(link), req) => match result {
+                Ok(active) => {
+                    load(&state, active).await;
+                }
+                Err(ApiError(_, error)) => tracing::warn!(%error, "A torrent Lampa added didn't start"),
+            },
+            // Stop, or Lampa's "drop": they wait for this task to let go of the lock.
+            _ = cancel.cancelled() => remove_all(&state).await,
+        }
+        let mut pending = state.pending.lock();
+        if pending.as_ref().is_some_and(|p| p.hash == hash) {
+            *pending = None;
+        }
+    });
+    Ok(value)
+}
+/// What Lampa gets when it adds the torrent that's loaded or resolving already.
+async fn loaded(state: &AppState, link: &str) -> Option<Value> {
+    let pending = state
+        .pending
+        .lock()
+        .as_ref()
+        .filter(|p| link_matches(link, &p.hash))
+        .map(pending_json);
+    if pending.is_some() {
+        return pending;
+    }
+    let active = state.active.lock().await;
+    let a = active.as_ref()?;
+    (a.link.as_deref() == Some(link) || link_matches(link, &a.handle.info_hash().as_string()))
+        .then(|| active_json(a))
+}
+/// Adds the torrent to the engine and waits until it can stream. The caller holds the
+/// add/stop lock, and no torrent is loaded.
+async fn start_torrent(
+    state: &AppState,
+    input: AddTorrent<'static>,
+    link: Option<String>,
+    req: AddRequest,
+) -> ApiResult<Active> {
     let result = tokio::time::timeout(
         Duration::from_secs(90),
         state.session.add_torrent(
@@ -647,12 +752,7 @@ async fn add(state: &Arc<AppState>, req: AddRequest, bytes: Option<Bytes>) -> Ap
     let handle = match result {
         Ok(Ok(response)) => response.into_handle().context("Torrent was not added")?,
         other => {
-            let ids = state
-                .session
-                .with_torrents(|it| it.map(|(id, _)| id).collect::<Vec<_>>());
-            for id in ids {
-                let _ = state.session.delete(id.into(), false).await;
-            }
+            remove_all(state).await;
             return Err(match other { Ok(Err(e)) => anyhow::anyhow!(e).into(),
                 _ => ApiError(StatusCode::GATEWAY_TIMEOUT,"Magnet resolution timed out. Try a .torrent file or a torrent with reachable peers.".into()) });
         }
@@ -662,7 +762,7 @@ async fn add(state: &Arc<AppState>, req: AddRequest, bytes: Option<Bytes>) -> Ap
         return Err(e.into());
     }
     let max_readers = state.factory.snapshot().slots.saturating_sub(1).clamp(1, 4);
-    let active = Active {
+    Ok(Active {
         title: if req.title.is_empty() {
             handle.name().unwrap_or_else(|| "Torrent".into())
         } else {
@@ -680,11 +780,24 @@ async fn add(state: &Arc<AppState>, req: AddRequest, bytes: Option<Bytes>) -> Ap
         viewed: Default::default(),
         preload: Default::default(),
         link,
-    };
+    })
+}
+/// Makes it the loaded torrent, and forgets the one kept for Lampa to play again.
+async fn load(state: &AppState, active: Active) -> Value {
     let value = active_json(&active);
     *state.resume.lock() = None;
     *state.active.lock().await = Some(active);
-    Ok(value)
+    value
+}
+/// Deletes what the engine holds after an add failed or was cancelled. The caller holds
+/// the add/stop lock and no torrent is loaded, so nothing else is in the engine.
+async fn remove_all(state: &AppState) {
+    let ids = state
+        .session
+        .with_torrents(|it| it.map(|(id, _)| id).collect::<Vec<_>>());
+    for id in ids {
+        let _ = state.session.delete(id.into(), false).await;
+    }
 }
 async fn add_json(
     State(state): State<Arc<AppState>>,
@@ -695,13 +808,40 @@ async fn add_json(
 async fn add_file(State(state): State<Arc<AppState>>, bytes: Bytes) -> ApiResult<Json<Value>> {
     Ok(Json(add(&state, AddRequest::default(), Some(bytes)).await?))
 }
+/// Releases the loaded torrent, or cancels the one Lampa added that's still resolving.
 /// `resume`: keep the torrent's link so Lampa can play it again by its hash (the idle
 /// release and Lampa's "drop"), rather than forget it (Stop and "rem").
 async fn stop(state: &AppState, resume: bool) -> ApiResult<()> {
-    let _op = state
-        .operation
-        .try_lock()
-        .map_err(|_| conflict("Another add/stop operation is running"))?;
+    let _op = lock_cancelling(state, resume).await?;
+    release(state, resume).await
+}
+/// Takes the add/stop lock. A torrent Lampa added that's still resolving is cancelled, and
+/// its task lets go of the lock as soon as it sees that.
+async fn lock_cancelling(state: &AppState, resume: bool) -> ApiResult<OwnedMutexGuard<()>> {
+    let pending = state.pending.lock().take();
+    let op = match &pending {
+        Some(p) => {
+            p.cancel.cancel();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                state.operation.clone().lock_owned(),
+            )
+            .await
+            .map_err(|_| busy())?
+        }
+        None => state
+            .operation
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| busy())?,
+    };
+    if let Some(p) = pending {
+        *state.resume.lock() = resume.then_some((p.hash, p.link));
+    }
+    Ok(op)
+}
+/// Releases the loaded torrent. The caller holds the add/stop lock.
+async fn release(state: &AppState, resume: bool) -> ApiResult<()> {
     if let Some(active) = state.active.lock().await.take() {
         let hash = active.handle.info_hash().as_string();
         *state.resume.lock() = active
@@ -737,13 +877,18 @@ pub async fn idle_watchdog(weak: Weak<AppState>) {
         if state.config.idle_seconds == 0 {
             continue;
         }
+        // Under the add/stop lock, so the torrent found idle is the one released, not one
+        // Lampa added in between.
+        let Ok(_op) = state.operation.try_lock() else {
+            continue;
+        };
         let idle = state.active.lock().await.as_ref().is_some_and(|a| {
             a.readers.available_permits() == a.max_readers
                 && now().saturating_sub(a.touched.load(Ordering::Relaxed))
                     >= state.config.idle_seconds
         });
         if idle {
-            let _ = stop(&state, true).await;
+            let _ = release(&state, true).await;
         }
     }
 }
@@ -897,25 +1042,39 @@ async fn compat_torrents(
     CompatJson(req): CompatJson<CompatRequest>,
 ) -> ApiResult<Json<Value>> {
     match req.action.as_str() {
-        "add" => Ok(Json(add(&state, req.add, None).await?)),
-        "list" => Ok(Json(
-            state
-                .active
-                .lock()
-                .await
-                .as_ref()
-                .map(|a| json!([active_json(a)]))
-                .unwrap_or(json!([])),
-        )),
+        "add" => Ok(Json(add_from_lampa(&state, req.add).await?)),
+        "list" => {
+            let active = state.active.lock().await.as_ref().map(active_json);
+            let pending = state.pending.lock().as_ref().map(pending_json);
+            Ok(Json(json!(
+                active.or(pending).into_iter().collect::<Vec<_>>()
+            )))
+        }
         "get" => {
-            let a = current(&state).await?;
-            ensure_hash(&a, &req.hash)?;
-            Ok(Json(active_json(&a)))
+            if let Some(a) = state.active.lock().await.as_ref()
+                && a.handle.info_hash().as_string() == req.hash
+            {
+                return Ok(Json(active_json(a)));
+            }
+            let pending = state
+                .pending
+                .lock()
+                .as_ref()
+                .filter(|p| p.hash == req.hash)
+                .map(pending_json);
+            pending
+                .map(Json)
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "Torrent not found".into()))
         }
         "rem" | "drop" => {
-            let a = current(&state).await?;
-            ensure_hash(&a, &req.hash)?;
-            drop(a);
+            let resolving = state
+                .pending
+                .lock()
+                .as_ref()
+                .is_some_and(|p| p.hash == req.hash);
+            if !resolving {
+                ensure_hash(&current(&state).await?, &req.hash)?;
+            }
             // TorrServer keeps a dropped torrent and removes a "rem" one.
             stop(&state, req.action == "drop").await?;
             Ok(Json(json!({})))

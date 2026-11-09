@@ -33,6 +33,9 @@ def main():
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     passed = []
     swarm = Swarm(32)
+    # Two more torrents: the next one Lampa opens, and one whose magnet link resolves slowly.
+    other = Swarm(24)
+    slow = Swarm(16, metadata_delay=3)
     # Delay payload, not metadata. Preload must acknowledge before data arrives.
     data_at = swarm.data_at
     def delayed_payload(offset, length):
@@ -208,8 +211,50 @@ def main():
                 assert response.status == 206
                 assert response.read() == payload(swarm.prefix, 10003)
             assert api('/api/status', origin=base)['torrent']['hash'] == hash_value
-            api('/torrents', {'action': 'rem', 'hash': hash_value})
             mark('A dropped torrent comes back when Lampa plays it by hash')
+
+            # Lampa adds the next torrent before it drops the one it played last.
+            def lampa_add(link, title):
+                return {'action': 'add', 'link': link, 'title': '[LAMPA] ' + title, 'poster': '',
+                        'data': '{}', 'category': 'movie', 'save_to_db': 'false'}
+            other_url = other.tracker_url.replace('/announce', '/file.torrent')
+            next_one = api('/torrents', lampa_add(other_url, 'Next movie'))
+            assert next_one['hash'] == other.info_hash.hex() and next_one['file_stats']
+            # A late "drop" of the last one leaves the new one alone.
+            error(404, '/torrents', data={'action': 'drop', 'hash': hash_value})
+            assert api('/api/status', origin=base)['torrent']['hash'] == other.info_hash.hex()
+            mark('Opening another torrent in Lampa replaces the one it played before')
+
+            # Lampa gives "add" 30 s, then asks "get" every 2 s until the files are there,
+            # because TorrServer answers at once and resolves a magnet link in the background.
+            slow_hash = slow.info_hash.hex()
+            magnet = 'magnet:?xt=urn:btih:' + slow_hash + '&tr=' + urllib.parse.quote(slow.tracker_url, safe='')
+            started = time.monotonic()
+            pending = api('/torrents', lampa_add(magnet, 'Slow movie'), timeout=5)
+            assert time.monotonic() - started < 2, 'Adding waited for the magnet link to resolve'
+            assert pending['hash'] == slow_hash and not pending.get('file_stats'), pending
+            assert [t['hash'] for t in api('/torrents', {'action': 'list'})] == [slow_hash]
+            assert api('/api/status', origin=base)['resolving']
+            while not api('/torrents', {'action': 'get', 'hash': slow_hash}, timeout=2).get('file_stats'):
+                assert time.monotonic() - started < 30, 'The magnet link never resolved'
+                time.sleep(.2)
+            assert time.monotonic() - started >= slow.metadata_delay
+            mark("Lampa's add answers at once while a magnet link resolves, and the files follow")
+
+            # Lampa's "drop" and the app's Stop cancel a torrent that's still resolving.
+            api('/torrents', {'action': 'rem', 'hash': slow_hash})
+            def native_stop():
+                with request('/api/torrents', origin=base, method='DELETE') as response:
+                    assert response.status == 200
+            for stop in (lambda: api('/torrents', {'action': 'drop', 'hash': slow_hash}), native_stop):
+                assert not api('/torrents', lampa_add(magnet, 'Slow movie'), timeout=5).get('file_stats')
+                started = time.monotonic()
+                stop()
+                assert time.monotonic() - started < 2, 'Stopping waited for the magnet link'
+                status = api('/api/status', origin=base)
+                assert status['torrent'] is None and not status['resolving'], status
+                assert status['cache']['allocated_bytes'] == 0, status
+            mark('Dropping or stopping a torrent that is still resolving cancels it at once')
             report.write_text(json.dumps({'passed': passed, 'physical_tv_tested': False}, indent=2) + '\n')
         finally:
             process.terminate()
@@ -218,7 +263,8 @@ def main():
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-            swarm.close()
+            for s in (swarm, other, slow):
+                s.close()
 
 
 if __name__ == '__main__':
