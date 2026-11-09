@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+## 0.2.7 (2026-11-09)
+
 - Fixed seeks that took a long time or never started after a pause, or once the cache had filled. The app disconnected peers that had nothing to send yet, and a seek then waited, sometimes minutes, for them to be tried again.
 
 ## 0.2.6 (2026-11-09)
