@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+## 0.2.4 (2026-11-09)
+
 - **Settings → Cache:** choose 96, 192 or 256 MiB. More cache keeps more of the video around where you're watching, for smoother playback on slow torrents and quicker seeks back. A change applies to the next torrent you add.
 - Torrents made of many small pieces stream smoothly instead of slowing down and keeping a processor core busy.
 - Downloads from all connected peers at once. Before, at most four peers sent data at a time, which could hold back torrents with many slow peers.
