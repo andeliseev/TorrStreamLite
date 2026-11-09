@@ -9,6 +9,7 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 - **TV access** is now **Home network → Allow other devices**, and it uses port 8090 by default, the port TorrServer apps expect. A port you chose before stays.
 - **Settings → Appearance:** follow the system, or always light or dark.
 - An app icon, and the standard Mac menus: About, Hide (⌘H), Close Window (⌘W) and Minimize (⌘M).
+- Fixed a stall of 10 seconds or more that could follow a seek or opening another file: the app no longer drops its peers between requests.
 - Web pages open in your browser can no longer control TorrStream Lite or see what's playing, unless **Allow other devices** is on: then the TV address still works without a password for everything on your home network.
 
 ## 0.2.2 (2026-11-08)

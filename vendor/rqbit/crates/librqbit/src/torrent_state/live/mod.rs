@@ -891,6 +891,13 @@ impl TorrentStateLive {
     // We might have the torrent "finished" i.e. no selected files. But if someone is streaming files despite
     // them being selected, we aren't fully "finished".
     fn is_finished_and_no_active_streams(&self) -> bool {
+        // RAM storage never finishes: it holds only the readers' window, and readers come and go
+        // with every seek. Treating "no reader right now" as finished disconnected idle peers, and a
+        // disconnect that completed just after the next reader started put the peer on a 10 s+
+        // backoff, stalling that reader. Peers stay connected until the torrent is removed.
+        if self.files.ram_cache_slots().is_some() {
+            return false;
+        }
         self.is_finished()
             && !self.has_active_streams_unfinished_files(
                 &self.lock_read("is_finished_and_dont_need_peers"),

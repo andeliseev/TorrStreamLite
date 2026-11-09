@@ -44,7 +44,7 @@ The engine's local changes are listed in [vendor/UPSTREAM.md](../vendor/UPSTREAM
 - Only the windows that active HTTP readers request are downloaded. There's no background whole-file download.
 - Readers' windows and pieces being verified are protected from eviction. Eviction clears the engine's HAVE and per-file counters, so backward seeks download again correctly.
 - After a seek, obsolete requests are cancelled and late replies are discarded safely. Slots are reused after their writers finish. Reads and eviction coordinate through the same engine lock.
-- At most 20 connected or connecting peers by default, 16 outstanding block requests per peer, four metadata connections and 256 discovered peer candidates.
+- At most 20 connected or connecting peers by default, 16 outstanding block requests per peer, four metadata connections and 256 discovered peer candidates. Peers stay connected while the torrent is loaded, also between a player's requests, so a seek doesn't wait for reconnections.
 - Up to four simultaneous HTTP requests for one playback session, fewer when pieces are large. Each response has one 64 KiB queued chunk and a bounded producer buffer.
 - Stop cancels slow readers and unmaps the cache. An idle torrent is released after five minutes.
 

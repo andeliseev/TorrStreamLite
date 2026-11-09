@@ -12,7 +12,7 @@ Local changes supporting bounded RAM streaming:
 - `torrent_state/initializing.rs`: ephemeral storage starts with an empty bitfield without scanning nonexistent files.
 - `piece_tracker.rs`: bounded demand-only acquisition, explicit verifying state, safe reservation/cancellation, no whole-file queue in RAM mode.
 - `chunk_tracker.rs`: eviction clears HAVE/chunk state and subtracts per-file and total cached-byte counters.
-- `torrent_state/live/mod.rs`: integrate reservations before peer requests, cancel obsolete pieces, protect concurrent writers and hash checks, cap discovered candidates, wake downloaders after reader changes.
+- `torrent_state/live/mod.rs`: integrate reservations before peer requests, cancel obsolete pieces, protect concurrent writers and hash checks, cap discovered candidates, wake downloaders after reader changes, and never treat RAM storage as finished, so idle peers stay connected between readers instead of being disconnected and backed off for 10 s or more.
 - `torrent_state/streaming.rs`: cache-sized interleaved reader windows, EOF handling, wakeups, and atomic HAVE/read access relative to eviction.
 - `dht_utils.rs`: metadata connection concurrency 4 and candidate limit 256.
 - `peer_info_reader/mod.rs`: metadata size limit 2 MiB and zero-size rejection.
