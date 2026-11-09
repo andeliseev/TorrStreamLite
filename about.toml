@@ -1,0 +1,93 @@
+# cargo-about settings for THIRD_PARTY_NOTICES.txt. Don't run cargo-about on its own:
+# scripts/notices.py runs it, keeps the crates linked into the server, and writes the file.
+
+# The targets the server ships for: the Mac app and the Keenetic router build.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# The licenses we accept, most preferred first: a crate that offers several is listed
+# under the first one here. A crate under any other license stops the build of the notices.
+# BSL-1.0 comes before Apache-2.0 for ryu, whose Apache file the scanner reads as "Pixar".
+accepted = [
+    "MIT",
+    "BSL-1.0",
+    "ISC",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "Apache-2.0",
+    "MPL-2.0",
+]
+
+# Crates whose own license files the scanner misreads. Each checksum is the SHA-256 of
+# the text used; when a crate's file changes, the clarification stops applying and
+# scripts/notices.py fails until it's checked and updated here.
+
+# Its MIT text is wrapped narrowly, below the scanner's confidence threshold.
+[async-stream.clarify]
+license = "MIT"
+
+[[async-stream.clarify.files]]
+path = "LICENSE"
+checksum = "157d381f6304eba77459fc10dfb5b1b22fc0d04e384a32865f32d8e67a34c0eb"
+
+# One file holds both licenses; this is the part with the MIT text and its notices.
+[chrono.clarify]
+license = "MIT OR Apache-2.0"
+
+[[chrono.clarify.files]]
+path = "LICENSE.txt"
+license = "MIT"
+start = "Rust-chrono is dual-licensed"
+end = "THE SOFTWARE."
+checksum = "8f62e89f5d579c48175357a870e1e8096ad2c3ef95b0655d9344d1e112a4d207"
+
+# The scanner reads this Apache-2.0 text as "Pixar".
+[sync_wrapper.clarify]
+license = "Apache-2.0"
+
+[[sync_wrapper.clarify.files]]
+path = "LICENSE"
+checksum = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+
+# The engine author's crates hold only the copyright line and the short Apache-2.0
+# notice, which the scanner would drop. The full text comes with the vendored engine.
+[librqbit-utp.clarify]
+license = "Apache-2.0"
+
+[[librqbit-utp.clarify.files]]
+path = "LICENSE"
+checksum = "6e6c6641a80b24c933a77886da6091f617131f925a24e593fcc1ccc47fb0a8a5"
+
+[librqbit-dualstack-sockets.clarify]
+license = "Apache-2.0"
+
+[[librqbit-dualstack-sockets.clarify.files]]
+path = "LICENSE"
+checksum = "1f5187f86af02a1a309ae8ba72d7b678bd2e7cd2413421ab6ddbf539065ef45f"
+
+# One file holds both licenses; this is the ISC part, with its copyright line.
+[aws-lc-rs.clarify]
+license = "ISC AND (Apache-2.0 OR ISC)"
+
+[[aws-lc-rs.clarify.files]]
+path = "LICENSE"
+license = "ISC"
+start = "ISC license"
+end = "PERFORMANCE OF THIS SOFTWARE."
+checksum = "e8a32ff587b5f483695b06272ad3b1e2274cf020f7fa9c2fe3dbf5aa3be039fd"
+
+# AWS-LC's LICENSE lists the copyright notices of every part compiled into the library,
+# followed by the full texts of their licenses. It's used whole, for all of them.
+[aws-lc-sys.clarify]
+license = "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)"
+
+[[aws-lc-sys.clarify.files]]
+path = "LICENSE"
+checksum = "728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e"
+
+[[aws-lc-sys.clarify.files]]
+path = "aws-lc/third_party/fiat/LICENSE"
+license = "MIT"
+checksum = "43e358d7b6eb109d0f51f7b3a090fd82607965767c25fadee39e922475de2061"

@@ -104,4 +104,4 @@ Bug reports and pull requests are welcome. To report a security problem, see [SE
 
 ## License
 
-[MIT](LICENSE), © 2026 Andrei Eliseev. The modified librqbit engine stays under Apache-2.0; see the [third-party notices](THIRD_PARTY_NOTICES.txt).
+[MIT](LICENSE), © 2026 Andrei Eliseev. The modified librqbit engine stays under Apache-2.0, and the other libraries the app is built with keep their own licenses; see the [third-party notices](THIRD_PARTY_NOTICES.txt).

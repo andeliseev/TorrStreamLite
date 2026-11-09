@@ -37,15 +37,16 @@ sh scripts/cargo.sh clippy --locked --all-targets -- -D warnings
 sh scripts/cargo.sh test --locked
 python3 tests/release.py
 node tests/peer-rates.cjs
+python3 scripts/notices.py --check
 ```
 
-The engine's own unit tests, in `vendor/rqbit`, aren't part of `cargo test`. Run them from its workspace; that updates its lockfile, so restore it afterwards:
+The engine's own unit tests, in `vendor/rqbit`, aren't part of `cargo test`. They run in the engine's workspace, with its own `Cargo.lock` and the features the app uses. They cover librqbit, where all the local changes are, and stay on the local machine:
 
 ```sh
-cd vendor/rqbit
-cargo test -p librqbit --no-default-features --features rust-tls,disable-upload --lib --target-dir ../../target/rqbit-tests
-git checkout Cargo.lock
+sh scripts/cargo.sh test --locked --manifest-path vendor/rqbit/Cargo.toml -p librqbit --no-default-features --features rust-tls,disable-upload --lib --target-dir target/rqbit-tests
 ```
+
+When the engine's manifests change, update its lockfile with the same command without `--locked`, check that the change to `vendor/rqbit/Cargo.lock` is only what the manifests ask for, and commit it.
 
 The streaming tests start a real server against a local BitTorrent peer that serves generated data. They use `target/release/torrstream-lite`, which `scripts/build-macos.sh` builds; after a debug build (`sh scripts/cargo.sh build --locked`), add `--binary target/debug/torrstream-lite`.
 
@@ -100,6 +101,26 @@ On an Apple Silicon Mac, November 8, 2026, with the local peer:
 
 These aren't router benchmarks or a guarantee for Internet swarms, and there's no measured comparison with TorrServer yet.
 
+## Third-party notices
+
+[`THIRD_PARTY_NOTICES.txt`](../THIRD_PARTY_NOTICES.txt) holds the license texts and copyright notices of every crate compiled into the server, for the Mac app (`aarch64-apple-darwin`) and the Keenetic build (`aarch64-unknown-linux-musl`). The server shows it in **Settings → Third-party notices** (`/licenses/third-party`), and the Mac app and the router tarball include it. It's generated; don't edit it by hand. After changing dependencies, write it again and commit it with the change:
+
+```sh
+python3 scripts/notices.py
+```
+
+[`scripts/notices.py`](../scripts/notices.py) runs [cargo-about](https://github.com/EmbarkStudios/cargo-about) 0.9.3 with [`about.toml`](../about.toml) to find each crate's license files, and `cargo tree` for both targets to keep only the crates linked into the server: not the procedural macros and build scripts that only run during the build. It writes each license text once, under the crates it covers. It needs network access for the crates' sources, and cargo-about, once:
+
+```sh
+sh scripts/cargo.sh install cargo-about --locked --version 0.9.3 --features cli
+```
+
+The Release workflow runs `python3 scripts/notices.py --check`, which fails when the file isn't what the script would write. The script also stops when a linked crate has no license text of its own, which would leave out its copyright notice:
+
+- **A license file the scanner misreads** (cargo-about falls back to the license's standard text): add a clarification for that file to `about.toml`, with the SHA-256 of the text it uses (`shasum -a 256 <file>` for a whole file; the part between `start` and `end` when it uses one). The checksum makes the clarification stop applying when a new version of the crate changes the file; check the file again then.
+- **A crate that ships no license file:** take it from the crate's repository, at the commit in the published crate's `.cargo_vcs_info.json`, put it in `licenses/` and add it to `MISSING_LICENSES` in the script. The vendored engine's crates use upstream's notice, `vendor/rqbit/LICENSE`, and the Apache-2.0 text in `licenses/Apache-2.0.txt`.
+- **A license that isn't in `accepted`** in `about.toml`: decide whether the app can include that crate. The list is in order of preference, so a crate that offers several licenses is listed under the first one it offers.
+
 ## Project layout
 
 | Folder | Contents |
@@ -110,6 +131,7 @@ These aren't router benchmarks or a guarantee for Internet swarms, and there's n
 | `scripts/` | Mac build and DMG, Keenetic build, Rust toolchain helper, release helper, app icon, screenshots |
 | `tests/` | Local torrent peer, streaming, memory, network, Lampa and release tests |
 | `vendor/` | The pinned librqbit engine with local changes ([UPSTREAM.md](../vendor/UPSTREAM.md)) |
+| `licenses/` | License texts that crates don't ship themselves, for the [third-party notices](#third-party-notices) |
 | `docs/` | These notes |
 | `.github/workflows/` | The Release workflow |
 
@@ -154,7 +176,7 @@ xcrun swift-format format --in-place macos/App.swift
 
 ## Releases (GitHub Actions)
 
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) tests, builds and publishes a release in one click. It needs no secrets: it uses the repository's built-in `GITHUB_TOKEN`. Repository rules must let GitHub Actions push to `main`, for the version commit.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) tests, builds and publishes a release in one click. It needs no secrets: it uses the repository's built-in `GITHUB_TOKEN`. Repository rules must let GitHub Actions push to `main`, for the release commit.
 
 **To release:** **Actions → Release → Run workflow**, choose what to raise and what to build, and run it:
 
@@ -178,24 +200,23 @@ It prints the last release and the next version. The last release is the highest
 
 The workflow then:
 
-1. **Tests:** formatting, Clippy, unit tests, the release helper and peer speed tests, then the streaming, Lampa and TV access tests against a local peer, on Linux. If anything fails, nothing is committed or built.
+1. **Tests:** formatting, Clippy, unit tests, the release helper and peer speed tests, the [third-party notices](#third-party-notices) and the engine's own tests, then the streaming, Lampa and TV access tests against a local peer, on Linux. If anything fails, nothing is committed or built.
 2. Works out the version with `scripts/release.py next`. It stops if that isn't newer than the last release, or is lower than the version already in `Cargo.toml`.
-3. Sets it in `Cargo.toml`, `Cargo.lock` and `macos/Info.plist` (`scripts/release.py set`).
+3. Sets it in `Cargo.toml`, `Cargo.lock` and `macos/Info.plist` (`scripts/release.py set`). Each job does this in its own checkout; nothing is committed yet.
 4. Moves the **Unreleased** lines of [`CHANGELOG.md`](../CHANGELOG.md) under `## X.Y.Z (date)` (`scripts/release.py changelog`), leaving an empty Unreleased section for the next changes. With nothing under Unreleased, the run shows a warning and the release has no "What's new".
-5. Commits all that as "Release vX.Y.Z" to `main`, authored by whoever ran the workflow (with their GitHub noreply address, so no bot appears among the contributors). Run `git pull` afterwards, before you commit locally.
-6. Creates a draft release `vX.Y.Z` whose text starts with **What's new** (those changelog lines), replacing a draft left by a failed run.
-7. Builds the chosen platforms in parallel and uploads them to the draft, each with a `.sha256` file:
+5. Creates a draft release `vX.Y.Z` whose text starts with **What's new** (those changelog lines), replacing a draft left by a failed run.
+6. Builds the chosen platforms in parallel, with the new version, and uploads them to the draft, each with a `.sha256` file:
    - **macOS:** builds the app on an Apple Silicon runner, verifies its signature, runs the Lampa test against the server inside the app, and packages `TorrStream-Lite-X.Y.Z-macos-arm64.dmg`.
-   - **Keenetic:** cross-compiles a static ARM64 Linux binary with `cargo-zigbuild`, checks that it's static ARM64, and packs `TorrStream-Lite-X.Y.Z-linux-arm64.tar.gz` with the licenses.
-8. Publishes the release only if every build succeeded. Only then does the `vX.Y.Z` tag exist.
+   - **Keenetic:** cross-compiles a static ARM64 Linux binary with `cargo-zigbuild`, checks that it's static ARM64, and packs `TorrStream-Lite-X.Y.Z-linux-arm64.tar.gz` with `LICENSE` and `THIRD_PARTY_NOTICES.txt`.
+7. Only if every build succeeded: commits the version and changelog changes as "Release vX.Y.Z" to `main`, authored by whoever ran the workflow (with their GitHub noreply address, so no bot appears among the contributors), and publishes the release with its `vX.Y.Z` tag on that commit. Run `git pull` afterwards, before you commit locally.
 
-**If a run fails,** fix the cause and run it again with the same choice. The tag doesn't exist yet, so the same version comes out, and its draft is replaced. The changelog already has that version's section, so its notes are reused.
+**If a run fails,** fix the cause and run it again with the same choice. A failed test or build leaves `main` as it was, and the tag doesn't exist yet, so the same version comes out and its draft is replaced. If something was pushed to `main` while the release ran, the last step stops rather than release a commit that wasn't built; run it again. If the release commit was pushed but the release wasn't published, the next run reuses that commit and the changelog's notes.
 
 **Before releasing,** check the Unreleased lines in `CHANGELOG.md`: they become the release notes as written. Don't set the version locally: the workflow does it.
 
 **Notes:**
 
-- There's no separate workflow for every push. The Release workflow runs the same tests before it builds anything, so run the [tests](#tests) locally before you push, and a broken `main` is caught at the latest when you release.
+- There's no separate workflow for every push. The Release workflow runs the same tests before it builds anything, so run the [tests](#tests) locally before you push, and a broken `main` is caught at the latest when you release. The Swift app and the macOS-only Rust code are first compiled in the macOS build, which still runs before anything is committed.
 - On a private repository, Actions minutes count against the account's monthly allowance, and macOS minutes count ten times. Each macOS release builds the app once. On a public repository the minutes are free.
 - The Mac app is ad-hoc signed and not notarized. The release notes explain **Open Anyway**.
 

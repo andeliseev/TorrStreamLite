@@ -36,7 +36,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
@@ -48,12 +48,24 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The app's workspace, and the vendored engine's for its own tests.
+          workspaces: |
+            .
+            vendor/rqbit
 
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: python3 tests/release.py
       - run: node tests/peer-rates.cjs
+      # THIRD_PARTY_NOTICES.txt must list the crates Cargo.lock now links into the server.
+      # The version must match CARGO_ABOUT in scripts/notices.py.
+      - run: cargo install cargo-about --locked --version 0.9.3 --features cli
+      - run: python3 scripts/notices.py --check
+      # The vendored engine's own unit tests, with its lockfile and the features the app uses.
+      - run: cargo test --locked -p librqbit --no-default-features --features rust-tls,disable-upload --lib
+        working-directory: vendor/rqbit
       - run: cargo build --locked
       - run: python3 tests/e2e.py --binary target/debug/torrstream-lite --size-mib 32 --corrupt-first
       # Adds a peer that stops answering, like one that chokes the engine mid-piece.
@@ -72,6 +84,8 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # Works out the version and creates a draft release. Nothing is committed until Publish,
+  # so a failed build leaves main as it was.
   prepare:
     name: Prepare
     needs: test
@@ -79,7 +93,6 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
-      sha: ${{ steps.commit.outputs.sha }}
       release_id: ${{ steps.release.outputs.id }}
       matrix: ${{ steps.platforms.outputs.matrix }}
     steps:
@@ -118,9 +131,10 @@ jobs:
           echo "$next" >> "$GITHUB_OUTPUT"
           version=$(echo "$next" | sed -n 's/^version=//p')
           last=$(echo "$next" | sed -n 's/^last=//p')
-          # After a failed run the files may already have this version; setting it again changes nothing.
+          # The same changes as Publish commits, here only to check them and read the notes.
+          # After a run that committed but didn't publish, main already has them.
           python3 scripts/release.py set "$version"
-          # CHANGELOG.md's Unreleased notes become this version's; the version commit includes it.
+          # CHANGELOG.md's Unreleased notes become this version's.
           python3 scripts/release.py changelog "$version" > "$RUNNER_TEMP/notes.md"
           if ! grep -q . "$RUNNER_TEMP/notes.md"; then
             echo "::warning::CHANGELOG.md has nothing under Unreleased, so this release has no What's new."
@@ -128,34 +142,16 @@ jobs:
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Releasing **v$version** (last release: $last)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Commit version change
-        id: commit
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
-          # Whoever started the release authors its commit, through their private
-          # noreply address: it counts as theirs, and no bot joins the contributors.
-          ACTOR: ${{ github.actor }}
-          ACTOR_ID: ${{ github.actor_id }}
-        run: |
-          if ! git diff --quiet; then
-            git config user.name "$ACTOR"
-            git config user.email "$ACTOR_ID+$ACTOR@users.noreply.github.com"
-            git commit -am "Release $TAG"
-            git push origin HEAD:main
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Create draft release
         id: release
         uses: actions/github-script@v9
         env:
           TAG: ${{ steps.version.outputs.tag }}
-          SHA: ${{ steps.commit.outputs.sha }}
           PLATFORMS: ${{ inputs.platforms }}
           NOTES: ${{ runner.temp }}/notes.md
         with:
           script: |
-            const { TAG: tag, SHA: sha, PLATFORMS: platforms } = process.env;
+            const { TAG: tag, PLATFORMS: platforms } = process.env;
             const notes = require('fs').readFileSync(process.env.NOTES, 'utf8').trim();
             const releases = await github.paginate(github.rest.repos.listReleases, context.repo);
             if (releases.some((r) => r.tag_name === tag && !r.draft)) {
@@ -188,10 +184,11 @@ jobs:
                 `Or run \`xattr -dr com.apple.quarantine "/Applications/TorrStream Lite.app"\` in Terminal. More in the [README](${repo}#first-launch).`,
               ] : []),
             ].join('\n');
+            // Publish points it at the release commit.
             const { data } = await github.rest.repos.createRelease({
               ...context.repo,
               tag_name: tag,
-              target_commitish: sha,
+              target_commitish: context.sha,
               name: `TorrStream Lite ${tag}`,
               body,
               draft: true,
@@ -210,8 +207,6 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -220,6 +215,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.platform }}
+
+      # The files as the release commit will have them; Publish commits them.
+      - name: Set version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/release.py set "$VERSION"
 
       - name: Build the Mac app and DMG
         if: matrix.platform == 'macos'
@@ -245,8 +246,7 @@ jobs:
           file dist/torrstream-lite-linux-arm64 | grep -q 'statically linked'
           mkdir -p release-assets
           tar -czf "release-assets/TorrStream-Lite-$VERSION-linux-arm64.tar.gz" \
-            LICENSE THIRD_PARTY_NOTICES.txt licenses/Apache-2.0.txt \
-            -C dist torrstream-lite-linux-arm64
+            LICENSE THIRD_PARTY_NOTICES.txt -C dist torrstream-lite-linux-arm64
 
       - name: Add checksums
         run: |
@@ -275,21 +275,50 @@ jobs:
               });
             }
 
-  # Publish only when every build succeeded, so a release is never half-empty.
+  # Commit and publish only when every build succeeded, so main never has a release commit
+  # without a release, and a release is never half-empty.
   publish:
     name: Publish
     needs: [prepare, build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v7
+
+      - name: Commit version change
+        id: commit
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          # Whoever started the release authors its commit, through their private
+          # noreply address: it counts as theirs, and no bot joins the contributors.
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+        run: |
+          python3 scripts/release.py set "$VERSION"
+          python3 scripts/release.py changelog "$VERSION" > /dev/null
+          if ! git diff --quiet; then
+            git config user.name "$ACTOR"
+            git config user.email "$ACTOR_ID+$ACTOR@users.noreply.github.com"
+            git commit -am "Release v$VERSION"
+            # Refused if main moved since the run started: the builds are of the commit before.
+            if ! git push origin HEAD:main; then
+              echo "::error::Couldn't push the release commit to main. If something was pushed there while the release ran, run the release again."
+              exit 1
+            fi
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          SHA: ${{ steps.commit.outputs.sha }}
         with:
           script: |
+            // The tag is created at the release commit.
             const { data } = await github.rest.repos.updateRelease({
               ...context.repo,
               release_id: Number(process.env.RELEASE_ID),
+              target_commitish: process.env.SHA,
               draft: false,
               make_latest: 'true',
             });

@@ -71,7 +71,7 @@ Native API, used by the control page:
 | `POST /api/torrents/file` | Raw `.torrent` bytes |
 | `DELETE /api/torrents` | Cancels playback and releases the torrent |
 | `GET/HEAD /api/stream/{file}` | Streams a **1-based** file index, with one HTTP byte range |
-| `GET /licenses/app`, `GET /licenses/third-party` | The MIT license, and the engine's notices and Apache-2.0 text |
+| `GET /licenses/app`, `GET /licenses/third-party` | The MIT license, and `THIRD_PARTY_NOTICES.txt`: the licenses and copyright notices of the crates compiled into the server |
 
 TorrServer-compatible subset, used by Lampa: `/echo`; `POST /torrents` with the actions `add`, `list`, `get`, `set`, `rem` and `drop`; `POST /settings` action `get`; `POST /cache` action `get` (a summary, with empty per-piece and reader details); `POST /viewed` actions `list`, `set` and `rem` (for the current torrent, in RAM only); and `/stream?link=<hash-or-magnet>&index=1&play`. `drop` releases the torrent but keeps its link in memory, as the idle release does, so a later `/stream?link=<hash>` adds it again the way it was added; `rem` and Stop forget it, and any other hash becomes a magnet link for DHT. `/stream` also supports `stat`, `m3u` and an asynchronous `preload`. Preload warms up to 8 MiB or a quarter of the cache, whichever is smaller, using the existing cache and one 64 KiB read buffer. Playback or Stop cancels an unfinished preload.
 

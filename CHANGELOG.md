@@ -9,6 +9,7 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 - Closed ways for web pages, and for other devices on the same network, to reach the app's controls.
 - The streaming server now quits with the app, even after a crash or Force Quit.
 - Right-clicking the window no longer offers Back and Reload, which could leave it blank or bring back an old home network setting.
+- **Settings → Third-party notices** lists every library built into the app, with its license and copyright notices, instead of only the torrent engine's license.
 
 ## 0.2.4 (2026-11-09)
 

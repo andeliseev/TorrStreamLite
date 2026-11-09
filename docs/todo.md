@@ -50,13 +50,11 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 ## Release and tests
 
-- [ ] Run the engine's own tests in the Release workflow; its vendored lockfile is out of date, so they can't run with `--locked`
 - [ ] The streaming tests run a debug build, where a panic only ends one task; release builds abort the whole server. Test a release build and fail on `panicked` in the logs
-- [ ] The release commit is pushed before the Swift app and the macOS-only Rust are compiled; compile them in the Test job, or commit in Publish
 - [ ] Harden the workflow: a read-only token in Build, actions pinned by SHA, hashed `pip install`, build attestations
-- [ ] License notices: the app and the router tarball include two license texts for about 285 crates; generate full notices (`cargo about`)
 - [ ] The router build doesn't start without CA certificates (Entware's `ca-certificates`); bundle root certificates or document it, and smoke-run the binary
 - [ ] Some test checks can hardly fail: no memory bound at small caches, "cache budget respected", and "no files written" looks only at the working directory
 - [ ] `docs/router.md` runs a file name the tarball doesn't have, and `tests/video_smoke.py` isn't documented
 - [ ] Pin the Rust toolchain, and drop engine features the app doesn't use (uTP, UPnP, LSD, SOCKS) to shrink the binary
+- [ ] `THIRD_PARTY_NOTICES.txt` adds 246 KB to the server, half of it the MIT text repeated for each crate's copyright lines; one copy of the text under all of those lines would take a fraction of that
 - [ ] A re-taken piece can lose its requests if the peer-side cancel runs after the same peer took it again; the stall rule moves it 5 s later

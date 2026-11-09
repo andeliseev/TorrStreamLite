@@ -4,7 +4,7 @@ Source: https://github.com/ikatson/rqbit
 
 Commit: `f23bacdddcc5318caa813418b8eb1b1d7307faaa` (workspace version 9.1.0).
 
-License: Apache-2.0, retained at `rqbit/LICENSE`. Source authorship and package metadata are retained in each crate. The upstream desktop app and web build assets are not included. The upstream workspace's desktop/binary default members are removed from its root manifest; this project builds the library only.
+License: Apache-2.0, retained at `rqbit/LICENSE`. Source authorship and package metadata are retained in each crate. The upstream desktop app and web build assets are not included. The upstream workspace's desktop/binary default members are removed from its root manifest; this project builds the library only. `rqbit/Cargo.lock` drops the packages only those members used, with no other version changed, so the engine's tests run with `--locked`.
 
 Local changes supporting bounded RAM streaming:
 

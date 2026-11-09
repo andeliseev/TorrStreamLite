@@ -178,11 +178,7 @@ pub fn router(state: Arc<AppState>, lan: bool) -> Router {
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    concat!(
-                        include_str!("../THIRD_PARTY_NOTICES.txt"),
-                        "\n\n",
-                        include_str!("../licenses/Apache-2.0.txt")
-                    ),
+                    include_str!("../THIRD_PARTY_NOTICES.txt"),
                 )
             }),
         )
