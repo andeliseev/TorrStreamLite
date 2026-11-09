@@ -18,6 +18,8 @@ Local changes supporting bounded RAM streaming:
 - `dht_utils.rs`: metadata connection concurrency 4 and candidate limit 256.
 - `peer_info_reader/mod.rs`: metadata size limit 2 MiB and zero-size rejection.
 
+A test fix: in `tests/fake_peer.rs`, `test_fake_peer_downloads_a_block_from_a_seeder` waits for the seeder's upload counter. The seeder updates it when its write returns, which can be after the peer has read the block, so the test failed now and then on Linux.
+
 The last two limits apply to this vendored build generally. The storage/scheduler changes opt in only for RAM storage. Metadata and cache limits are intentional product constraints and are documented in the root README.
 
 TorrServer's source at commit `0c48c9ac78de2864f5fc9341e8caf89d355a4850` was inspected for architecture and the documented API shapes. Its Go implementation was not copied into this server.

@@ -7,3 +7,4 @@ __pycache__/
 *.py[cod]
 
 /release-assets/
+/vendor/rqbit/target/
