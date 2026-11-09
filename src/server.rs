@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, FromRequest, Path, Query, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Path, Query, Request, State},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     io::SeekFrom,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -185,6 +185,7 @@ pub fn router(state: Arc<AppState>, lan: bool) -> Router {
             "/api/network",
             get(crate::network::status).post(crate::network::update),
         )
+        .route("/api/cache", post(update_cache))
         .route("/api/torrents", post(add_json).delete(remove_active))
         .route("/api/torrents/file", post(add_file))
         .route("/api/stream/{file}", get(native_stream))
@@ -391,7 +392,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let active = state.active.lock().await.as_ref().map(active_json);
     Json(
         json!({"server":"TorrStream Lite", "version":env!("CARGO_PKG_VERSION"), "mode":"RAM only", "resident_bytes":crate::memory::resident_bytes(),
-        "cache":state.factory.snapshot(), "peer_limit":state.config.peers, "uptime_seconds":state.started.elapsed().as_secs(),
+        "cache":state.factory.snapshot(), "cache_setting_mib":state.factory.budget() >> 20, "peer_limit":state.config.peers, "uptime_seconds":state.started.elapsed().as_secs(),
         "torrent":active, "resolving":state.operation.try_lock().is_err()}),
     )
 }
@@ -429,6 +430,32 @@ async fn peer_details(State(state): State<Arc<AppState>>) -> Response {
         })),
     )
         .into_response()
+}
+#[derive(Deserialize)]
+struct CacheUpdate {
+    mib: u16,
+}
+/// Settings → Cache: the size of the next torrent's cache. Like TV access, only the
+/// computer running the server may change it; a loaded torrent keeps its own cache.
+async fn update_cache(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(update): Json<CacheUpdate>,
+) -> ApiResult<Json<Value>> {
+    if !peer.ip().is_loopback() {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "Change the cache on the computer that runs TorrStream Lite.".into(),
+        ));
+    }
+    if !(4..=256).contains(&update.mib) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Choose a cache from 4 to 256 MiB.".into(),
+        ));
+    }
+    state.factory.set_budget(update.mib as usize * 1024 * 1024);
+    Ok(Json(json!({"mib": update.mib})))
 }
 #[derive(Default, Deserialize)]
 struct AddRequest {
@@ -797,7 +824,7 @@ async fn settings(
         ));
     }
     Ok(Json(
-        json!({"CacheSize":state.config.cache_mib as usize*1024*1024,"ConnectionsLimit":state.config.peers,"UseDisk":false,"DisableUpload":true}),
+        json!({"CacheSize":state.factory.budget(),"ConnectionsLimit":state.config.peers,"UseDisk":false,"DisableUpload":true}),
     ))
 }
 async fn compat_cache(

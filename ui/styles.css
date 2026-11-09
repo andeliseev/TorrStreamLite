@@ -784,6 +784,9 @@ button.stat:hover {
 #tv-port {
   width: 90px;
 }
+#cache-size {
+  margin-top: 8px;
+}
 .segmented {
   display: inline-flex;
   gap: 2px;

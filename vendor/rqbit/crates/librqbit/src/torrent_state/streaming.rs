@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io::SeekFrom,
     sync::{
         Arc,
@@ -127,12 +127,15 @@ impl TorrentStreams {
             .map(|s| s.queue(lengths, lookahead))
             .collect();
         let mut wanted = Vec::with_capacity(limit);
+        // Readers' windows can overlap. A set keeps this linear: with small pieces a cache has
+        // thousands of slots, and this runs under the torrent's write lock for every new piece.
+        let mut seen = HashSet::with_capacity(limit);
         while wanted.len() < limit {
             let Some(mut q) = queues.pop_front() else {
                 break;
             };
             if let Some(p) = q.next() {
-                if !wanted.contains(&p) {
+                if seen.insert(p) {
                     wanted.push(p);
                 }
                 queues.push_back(q);

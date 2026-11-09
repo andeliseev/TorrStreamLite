@@ -269,6 +269,7 @@ async function copy(text, done) {
 // Home network (the server calls it TV access)
 function showNetwork(n) {
   networkState = n;
+  $("cache-options").hidden = !n.local_control;
   $("tv-switch").hidden = !n.local_control;
   $("tv-enabled").checked = n.enabled;
   $("tv-enabled").disabled = !n.local_control || networkBusy;
@@ -526,6 +527,7 @@ async function refresh() {
       ? size(s.cache.piece_bytes)
       : "—";
     $("app-version").textContent = s.version;
+    showCacheSetting(s.cache_setting_mib);
     showTorrent(t);
     const error = t?.engine?.error || t?.preload_error || "";
     if (loading || resolving) setState("busy", "Adding torrent…");
@@ -703,6 +705,40 @@ document.querySelectorAll("a[data-external]").forEach((link) => {
     if (desktopApp) {
       event.preventDefault();
       desktop({ action: "openExternal", url: link.href });
+    }
+  };
+});
+
+// Settings → Cache: the size of the next torrent's cache. The Mac app keeps it
+// and starts the server with it next time.
+function showCacheSetting(mib) {
+  for (const button of document.querySelectorAll("#cache-size button")) {
+    button.setAttribute(
+      "aria-checked",
+      String(Number(button.dataset.mib) === mib),
+    );
+  }
+}
+document.querySelectorAll("#cache-size button").forEach((button) => {
+  button.onclick = async () => {
+    const mib = Number(button.dataset.mib);
+    message("settings-error", "");
+    try {
+      await api("/api/cache", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mib }),
+      });
+      showCacheSetting(mib);
+      desktop({ action: "saveCacheSize", mib });
+      toast(
+        current
+          ? `Cache: ${mib} MiB from the next torrent`
+          : `Cache: ${mib} MiB`,
+      );
+      refresh();
+    } catch (e) {
+      message("settings-error", e.message);
     }
   };
 });

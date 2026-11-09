@@ -52,7 +52,7 @@ If macOS asks whether TorrStream Lite may find devices on your local network, cl
 2. Click **Play** next to a file. It opens in VLC or IINA. For another player, click the copy button next to it and open that address in the player.
 3. When you're done, click **Stop & release RAM**. One torrent plays at a time, so stop it before you add the next one.
 
-**Download** in the sidebar shows the connected peers and their speeds. **Settings** (⌘,) has the home network port, the appearance (System, Light or Dark), cache details and information about the app.
+**Download** in the sidebar shows the connected peers and their speeds. **Settings** (⌘,) has the home network port, the cache size, the appearance (System, Light or Dark), cache details and information about the app.
 
 ## Watching on your TV
 
@@ -69,7 +69,8 @@ The address uses port 8090, like TorrServer. If TorrServer itself runs on the sa
 
 TorrStream Lite started as a streaming server small enough to run on a home router, and the Mac app keeps that design:
 
-- **One cache, always the same size.** The video goes through a single 96 MiB block of RAM, whether the torrent is 1 GB or 100 GB. It's taken when you add a torrent and given back when you stop it, quit, or after five minutes with nothing playing.
+- **One cache, always the same size.** The video goes through a single block of RAM, 96 MiB unless you choose 192 or 256 MiB in **Settings → Cache**, whether the torrent is 1 GB or 100 GB. It's taken when you add a torrent and given back when you stop it, quit, or after five minutes with nothing playing.
+- **More cache, if you like.** A bigger cache keeps more of the video around where you're watching: smoother playback on slow torrents and quicker seeks back. A change applies to the next torrent you add.
 - **Only what you watch.** The app downloads the part your player asks for and a little ahead of it, never the whole file. Seeking back further than the cache holds downloads that part again.
 - **Measured:** in our tests the whole server used about 110 MiB while streaming and about 15 MiB after Stop. The window and your video player use memory of their own.
 - **No disk at all:** no video files, no cache files, no history.
@@ -81,7 +82,7 @@ TorrStream Lite runs on your computer. It has no account, no analytics and no se
 - **Torrent traffic:** like any torrent app, it connects to the trackers and peers of the torrent you add, and to the DHT network that helps find peers. They see your IP address.
 - **Torrent URLs:** when you add a torrent by its URL, the app downloads the .torrent file from that address.
 - **Nothing is kept:** the video is released when you stop the torrent or quit. Watched positions from TV apps last only until the torrent is stopped.
-- **Settings:** the Mac app saves only the home network switch and port, the appearance, and the window's size and position.
+- **Settings:** the Mac app saves only the home network switch and port, the cache size, the appearance, and the window's size and position.
 
 Read the full [privacy policy](https://andeliseev.github.io/torrstream-lite/privacy.html).
 
@@ -92,7 +93,7 @@ Read the full [privacy policy](https://andeliseev.github.io/torrstream-lite/priv
 - **Upload to other peers (seed).** It only downloads, so it doesn't help others finish the torrent, and it doesn't suit private trackers that require you to upload.
 - **Search for torrents.** Bring a magnet link or a .torrent file, or search in Lampa.
 - **Work as a DLNA media server.** A TV's own media player can't browse it; use Lampa, another TorrServer app, or a player with the stream address.
-- **Play a few rare torrents:** ones with pieces larger than 32 MiB, which don't fit the cache, and ones made only in the newer BitTorrent v2 format. Hybrid v1 and v2 torrents play.
+- **Play a few rare torrents:** ones whose pieces don't fit three times in the cache (larger than 32 MiB with the default 96 MiB cache, 64 MiB with a bigger one), and ones made only in the newer BitTorrent v2 format. Hybrid v1 and v2 torrents play.
 - **Run on Intel Macs.** The Keenetic router build hasn't been tested on a router yet.
 
 ## Building from source and contributing

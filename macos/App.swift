@@ -66,6 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     let storedPort = defaults.integer(forKey: "tvAccessPort")
     let tvPort = (1024...65535).contains(storedPort) ? storedPort : 8090
     let configuration = WKWebViewConfiguration()
+    // Like the video, the page's cache and storage stay in memory, never on disk.
+    configuration.websiteDataStore = .nonPersistent()
     configuration.userContentController.addUserScript(
       WKUserScript(
         source: """
@@ -169,7 +171,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     guard let resources = Bundle.main.resourceURL else { return }
     let process = Process()
     process.executableURL = resources.appendingPathComponent("torrstream-lite")
-    process.arguments = ["--listen", "127.0.0.1:0", "--cache-mib", "96"]
+    // Settings → Cache, saved by the page; 96 MiB unless chosen otherwise.
+    let savedCache = UserDefaults.standard.integer(forKey: "cacheMiB")
+    let cacheMiB = (4...256).contains(savedCache) ? savedCache : 96
+    process.arguments = ["--listen", "127.0.0.1:0", "--cache-mib", String(cacheMiB)]
     let pipe = Pipe()
     process.standardOutput = pipe
     process.standardError = pipe
@@ -272,6 +277,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         UserDefaults.standard.set(enabled, forKey: "tvAccessEnabled")
         UserDefaults.standard.set(port, forKey: "tvAccessPort")
       }
+    case "saveCacheSize":
+      if let mib = body["mib"] as? Int, (4...256).contains(mib) {
+        UserDefaults.standard.set(mib, forKey: "cacheMiB")
+      }
     case "setTheme":
       if let theme = body["theme"] as? String, ["system", "light", "dark"].contains(theme) {
         UserDefaults.standard.set(theme, forKey: "appearance")
@@ -349,6 +358,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
   }
 }
+/// Versions up to 0.2.3 had the bundle identifier local.torrstream-lite.mac. Moves their
+/// settings to this one once, and deletes what WebKit kept on disk for them.
+func moveOldSettings() {
+  let old = "local.torrstream-lite.mac"
+  let defaults = UserDefaults.standard
+  guard let id = Bundle.main.bundleIdentifier, id != old,
+    let saved = defaults.persistentDomain(forName: old)
+  else { return }
+  var settings = defaults.persistentDomain(forName: id) ?? [:]
+  settings.merge(saved) { current, _ in current }
+  defaults.setPersistentDomain(settings, forName: id)
+  defaults.removePersistentDomain(forName: old)
+  guard let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+  else { return }
+  for folder in ["Caches", "HTTPStorages", "WebKit"] {
+    try? FileManager.default.removeItem(
+      at: library.appendingPathComponent(folder).appendingPathComponent(old))
+  }
+}
+
+moveOldSettings()
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

@@ -4,6 +4,10 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+- **Settings → Cache:** choose 96, 192 or 256 MiB. More cache keeps more of the video around where you're watching, for smoother playback on slow torrents and quicker seeks back. A change applies to the next torrent you add.
+- Torrents made of many small pieces stream smoothly instead of slowing down and keeping a processor core busy.
+- The window no longer leaves a web cache on disk, and the one earlier versions left is deleted.
+
 ## 0.2.3 (2026-11-09)
 
 - A new look: the sidebar shows the status, download speed, cache, memory and the home network switch, and the main area shows the torrent's files. The window resizes cleanly and remembers its size and position.

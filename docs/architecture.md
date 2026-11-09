@@ -33,13 +33,14 @@ flowchart LR
 | `range.rs` | Parses a single HTTP byte range |
 | `memory.rs` | The server's resident memory, shown in the app |
 
-Options: `--listen` (default `127.0.0.1:8090`; the Mac app passes port 0), `--cache-mib` (96), `--peers` (20), `--idle-seconds` (300, 0 turns it off), `--tv-port` (8090, the port TorrServer apps expect), `--allow-origin` and `--allow-host` (both repeatable, see [Security](#security)) and `--no-dht`. The server prints `TORRSTREAM_LISTEN=http://…` once it listens; the Mac app reads that line.
+Options: `--listen` (default `127.0.0.1:8090`; the Mac app passes port 0), `--cache-mib` (96; Settings → Cache changes it for the next torrent, see `POST /api/cache`), `--peers` (20), `--idle-seconds` (300, 0 turns it off), `--tv-port` (8090, the port TorrServer apps expect), `--allow-origin` and `--allow-host` (both repeatable, see [Security](#security)) and `--no-dht`. The server prints `TORRSTREAM_LISTEN=http://…` once it listens; the Mac app reads that line.
 
 The engine's local changes are listed in [vendor/UPSTREAM.md](../vendor/UPSTREAM.md). They only apply when the storage is the RAM cache.
 
 ## Memory
 
-- One shared, anonymous RAM mapping, **96 MiB by default**. No video files, disk cache, session database or DHT persistence.
+- One shared, anonymous RAM mapping, **96 MiB by default**; the Mac app offers 192 and 256 MiB too. No video files, disk cache, session database or DHT persistence.
+- Finding the piece to evict and the readers' window take time linear in the number of slots (sets, not list searches), which matters with small pieces: a 96 MiB cache of 16 KiB pieces has 6,144 slots, and both run under the engine's lock.
 - A reusable piece slot is reserved **before any network request**. At most four pieces download or verify at once. No payload allocation grows with torrent size.
 - Only the windows that active HTTP readers request are downloaded. There's no background whole-file download.
 - Readers' windows and pieces being verified are protected from eviction. Eviction clears the engine's HAVE and per-file counters, so backward seeks download again correctly.
@@ -62,6 +63,7 @@ Native API, used by the control page:
 | `GET /api/peers` | Connected peers' counters, the torrent session ID and a monotonic sample time; no stored history |
 | `GET /api/network` | TV access: addresses, port, and whether the caller may change it |
 | `POST /api/network` | Loopback only: `{"enabled":true,"port":8090}`; the torrent keeps playing |
+| `POST /api/cache` | Loopback only: `{"mib":192}` (4 to 256), the size of the next torrent's cache; a loaded torrent keeps its own. `/api/status` reports it as `cache_setting_mib` |
 | `POST /api/torrents` | `{"link":"magnet:?..."}` or a torrent URL |
 | `POST /api/torrents/file` | Raw `.torrent` bytes |
 | `DELETE /api/torrents` | Cancels playback and releases the torrent |

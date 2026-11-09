@@ -224,6 +224,45 @@
           TorrStream Lite.
         </p>
         <p id="settings-error" class="error" role="alert" hidden></p>
+        <section id="cache-options">
+          <h3>Cache</h3>
+          <p class="hint">
+            More cache keeps more of the video around where you're watching:
+            smoother playback on slow torrents and quicker seeks back, for more
+            memory. It applies to the next torrent you add.
+          </p>
+          <div
+            id="cache-size"
+            class="segmented"
+            role="radiogroup"
+            aria-label="Cache size"
+          >
+            <button
+              type="button"
+              role="radio"
+              data-mib="96"
+              aria-checked="true"
+            >
+              96 MiB
+            </button>
+            <button
+              type="button"
+              role="radio"
+              data-mib="192"
+              aria-checked="false"
+            >
+              192 MiB
+            </button>
+            <button
+              type="button"
+              role="radio"
+              data-mib="256"
+              aria-checked="false"
+            >
+              256 MiB
+            </button>
+          </div>
+        </section>
         <section>
           <h3>Appearance</h3>
           <div

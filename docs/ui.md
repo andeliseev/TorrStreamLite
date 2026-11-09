@@ -36,6 +36,8 @@ Errors show in one banner under the torrent's title; a dismissed engine error st
 
 A .torrent file dropped anywhere on the window is added, and so is a magnet link or torrent URL pasted outside a text field.
 
+**Cache** (Settings) is 96, 192 or 256 MiB. The page sends it to `POST /api/cache`, which sizes the next torrent's cache, and the Mac app saves it and starts the server with it next time. Like the port, it shows only on the Mac itself.
+
 **Appearance** (Settings) is System, Light or Dark. It sets `data-theme` on `<html>`; the Mac app also stores it and sets the window's appearance, and browsers keep it in `localStorage`.
 
 ## Peer speeds
@@ -46,10 +48,12 @@ A .torrent file dropped anywhere on the window is added, and so is a magnet link
 
 `macos/App.swift` is the whole native app:
 
-- It starts `Contents/Resources/torrstream-lite --listen 127.0.0.1:0 --cache-mib 96`, waits for the `TORRSTREAM_LISTEN=` line and loads that address. Until then a startup screen in the window's colors shows.
+- It starts `Contents/Resources/torrstream-lite --listen 127.0.0.1:0 --cache-mib <size>` with the saved cache size (96 by default), waits for the `TORRSTREAM_LISTEN=` line and loads that address. Until then a startup screen in the window's colors shows.
 - The window has a transparent titlebar over the page (`fullSizeContentView`). A transparent view covers the titlebar band, so dragging there moves the window and a double-click zooms or minimizes it, as set in System Settings. The window and the web view's background match the page, so resizing doesn't flash. The size and position are remembered; the minimum is 720 × 520.
 - Navigation is allowed only to the server's origin. `torrstream-player://play?url=…` and `vlc://…` links open the stream in VLC, or in IINA when VLC isn't installed.
 - Menus: About (the standard panel), Settings… (⌘,), Hide (⌘H), Quit; File → Open Torrent File… (⌘O) and Close Window (⌘W); Edit; Window → Minimize (⌘M) and Zoom.
+- The web view's data store is non-persistent, so the page's cache and storage stay in memory.
+- Settings are saved in `UserDefaults` under the bundle identifier `com.andeliseev.torrstream-lite`, and the server inside the app is signed as `com.andeliseev.torrstream-lite.server`. Versions up to 0.2.3 used `local.torrstream-lite.mac`; at its first launch the app moves those settings over and deletes what WebKit kept on disk for that version.
 
 At document start it sets these globals for the page:
 
@@ -68,6 +72,7 @@ The page sends messages to `window.webkit.messageHandlers.desktop`. They're acce
 | --- | --- | --- |
 | `openExternal` | `url` | Opens the URL in the browser if it's one of the project's GitHub pages (a fixed list) |
 | `saveTVSettings` | `enabled`, `port` | Saves the home network switch and port in `UserDefaults`, for the next launch |
+| `saveCacheSize` | `mib` | Saves the cache size (4 to 256) in `UserDefaults`; the server starts with it next time |
 | `setTheme` | `theme` | Saves the appearance and sets `NSApp.appearance` |
 | `copy` | `text` | Copies up to 8,192 characters to the clipboard |
 

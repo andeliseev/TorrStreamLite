@@ -13,7 +13,9 @@ cp macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 mkdir -p "$APP/Contents/Resources/licenses"
 cp LICENSE THIRD_PARTY_NOTICES.txt "$APP/Contents/Resources/"
 cp licenses/Apache-2.0.txt "$APP/Contents/Resources/licenses/"
-codesign --force --sign - "$APP/Contents/Resources/torrstream-lite"
+# The server inside the app is signed as <bundle identifier>.server.
+BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' macos/Info.plist)
+codesign --force --sign - --identifier "$BUNDLE_ID.server" "$APP/Contents/Resources/torrstream-lite"
 codesign --force --sign - "$APP"
 # Finder and the Dock cache an app's icon by the bundle's date, which copying files
 # into it doesn't change. Bump it and re-register, so a rebuild shows the current icon.

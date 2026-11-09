@@ -84,6 +84,19 @@ with tempfile.TemporaryDirectory(prefix='torrstream-network-') as tmp:
             except urllib.error.HTTPError as e: assert e.code == 403, (url, path, e.code)
             else: raise AssertionError(f'{url}{path} accepted {headers}')
         mark('TV apps\' null origin works only on the TV listener; unknown host names are refused')
+        # Settings -> Cache: only the Mac changes it, and the loaded torrent keeps its cache.
+        assert api(base, '/api/cache', {'mib': 192}) == {'mib': 192}
+        status = api(base, '/api/status')
+        assert status['cache_setting_mib'] == 192, status['cache_setting_mib']
+        assert status['cache']['budget_bytes'] == 6 * 1048576, status['cache']
+        with request(lan, '/settings', json.dumps({'action': 'get'}).encode(), tv_app) as r:
+            assert json.load(r)['CacheSize'] == 192 * 1048576
+        for url, body, code in ((lan, {'mib': 96}, 403), (base, {'mib': 3}, 400), (base, {'mib': 300}, 400)):
+            try: api(url, '/api/cache', body)
+            except urllib.error.HTTPError as e: assert e.code == code, (url, body, e.code)
+            else: raise AssertionError(f'{url} accepted cache {body}')
+        assert api(base, '/api/status')['cache_setting_mib'] == 192
+        mark('Cache size changes only from the Mac, for the next torrent')
         for origin in (base, lan):
             with request(origin, '/api/stream/2', headers={'Range': 'bytes=11-1048586'}) as r:
                 assert r.status == 206

@@ -8,17 +8,18 @@ use librqbit_core::lengths::ValidPieceIndex;
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::Path,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
 #[derive(Clone)]
 pub struct RamFactory {
-    budget: usize,
+    /// Shared by every clone, including the engine's, so a new size reaches the next torrent.
+    budget: Arc<AtomicUsize>,
     occupied: Arc<AtomicBool>,
     current: Arc<Mutex<Weak<RamCache>>>,
 }
@@ -26,10 +27,18 @@ pub struct RamFactory {
 impl RamFactory {
     pub fn new(budget: usize) -> Self {
         Self {
-            budget,
+            budget: Arc::new(AtomicUsize::new(budget)),
             occupied: Default::default(),
             current: Default::default(),
         }
+    }
+    /// The size of the next torrent's cache.
+    pub fn budget(&self) -> usize {
+        self.budget.load(Ordering::Relaxed)
+    }
+    /// Settings → Cache. A loaded torrent keeps the cache it was given.
+    pub fn set_budget(&self, bytes: usize) {
+        self.budget.store(bytes, Ordering::Relaxed);
     }
     pub fn snapshot(&self) -> CacheStats {
         self.current
@@ -37,7 +46,7 @@ impl RamFactory {
             .upgrade()
             .map(|c| c.stats())
             .unwrap_or(CacheStats {
-                budget_bytes: self.budget,
+                budget_bytes: self.budget(),
                 ..Default::default()
             })
     }
@@ -72,7 +81,7 @@ impl StorageFactory for RamFactory {
             "Previous torrent is still releasing its cache; try again shortly"
         );
         let cache = match RamCache::new(
-            self.budget,
+            self.budget(),
             meta.lengths().default_piece_length() as usize,
             self.occupied.clone(),
         ) {
@@ -174,7 +183,7 @@ impl RamCache {
         })
     }
 
-    fn reserve(&self, piece: u32, protected: &[u32]) -> Option<Vec<u32>> {
+    fn reserve(&self, piece: u32, protected: &HashSet<u32>) -> Option<Vec<u32>> {
         let mut g = self.inner.lock();
         if g.pieces.contains_key(&piece) {
             return Some(Vec::new());
@@ -310,10 +319,10 @@ impl TorrentStorage for RamStorage {
         id: ValidPieceIndex,
         protected: &[ValidPieceIndex],
     ) -> Option<Vec<u32>> {
-        self.cache.reserve(
-            id.get(),
-            &protected.iter().map(|p| p.get()).collect::<Vec<_>>(),
-        )
+        // A set, so checking each cached piece against it stays linear: with small pieces the
+        // cache has thousands of slots, and this runs under the engine's lock for every piece.
+        let protected: HashSet<u32> = protected.iter().map(|p| p.get()).collect();
+        self.cache.reserve(id.get(), &protected)
     }
     fn release_ram_piece(&self, id: ValidPieceIndex) {
         self.cache.release(id.get());
@@ -331,25 +340,25 @@ mod tests {
         let c = cache();
         assert!(c.write(0, &[1]).is_err());
         for p in 0..3 {
-            assert!(c.reserve(p, &[]).is_some());
+            assert!(c.reserve(p, &HashSet::new()).is_some());
         }
-        assert!(c.reserve(3, &[0, 1, 2]).is_none());
+        assert!(c.reserve(3, &HashSet::from([0, 1, 2])).is_none());
         assert_eq!(c.stats().allocated_bytes, 12288);
         assert_eq!(c.stats().peak_reserved_bytes, 12288);
-        assert_eq!(c.reserve(3, &[0, 2]), Some(vec![1]));
+        assert_eq!(c.reserve(3, &HashSet::from([0, 2])), Some(vec![1]));
         assert!(c.read(4096, &mut [0]).is_err());
     }
     #[test]
     fn reuse_zeroes_old_data_and_cross_piece_io_works() {
         let c = cache();
-        c.reserve(0, &[]);
-        c.reserve(1, &[]);
+        c.reserve(0, &HashSet::new());
+        c.reserve(1, &HashSet::new());
         c.write(4090, &[7; 16]).unwrap();
         let mut buf = [0; 16];
         c.read(4090, &mut buf).unwrap();
         assert_eq!(buf, [7; 16]);
         c.release(0);
-        c.reserve(4, &[]);
+        c.reserve(4, &HashSet::new());
         c.read(4 * 4096 + 4090, &mut [0; 6]).unwrap();
         let mut zero = [1; 6];
         c.read(4 * 4096 + 4090, &mut zero).unwrap();
@@ -363,7 +372,7 @@ mod tests {
                 let c = c.clone();
                 std::thread::spawn(move || {
                     for n in 0..100 {
-                        c.reserve(i * 100 + n, &[]);
+                        c.reserve(i * 100 + n, &HashSet::new());
                     }
                 })
             })
@@ -373,6 +382,35 @@ mod tests {
         }
         assert_eq!(c.stats().peak_reserved_bytes, 12288);
         assert_eq!(c.stats().cached_pieces, 3);
+    }
+    #[test]
+    fn many_small_slots_evict_the_oldest_unprotected_piece_quickly() {
+        // 4096 slots, as with small pieces. The old list scan made each eviction
+        // check every slot against every protected piece: about 16 million steps.
+        let c = RamCache::new(4096 * 4096, 4096, Default::default()).unwrap();
+        for p in 0..4096 {
+            assert_eq!(c.reserve(p, &HashSet::new()), Some(vec![]));
+        }
+        let started = std::time::Instant::now();
+        for p in 4096..4608 {
+            // Everything from the newest 4000 pieces down is protected, like a reader's window.
+            let protected: HashSet<u32> = (p - 4000..p).collect();
+            assert_eq!(c.reserve(p, &protected), Some(vec![p - 4096]));
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "eviction is too slow"
+        );
+        assert_eq!(c.stats().evictions, 512);
+        assert_eq!(c.stats().cached_pieces, 4096);
+    }
+    #[test]
+    fn a_new_cache_size_reaches_the_engines_copy() {
+        let factory = RamFactory::new(96 << 20);
+        let engine = factory.clone();
+        factory.set_budget(192 << 20);
+        assert_eq!(engine.budget(), 192 << 20);
+        assert_eq!(factory.snapshot().budget_bytes, 192 << 20);
     }
     #[test]
     fn rejects_pieces_that_cannot_fit_working_set() {
