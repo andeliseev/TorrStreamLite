@@ -215,15 +215,20 @@ document.addEventListener("dragenter", (event) => {
   dragDepth += 1;
   $("drop-overlay").hidden = false;
 });
+// A dropped link or text outside a text field must not make the page open it.
+const inTextField = (event) => event.target.closest?.("input, textarea");
 document.addEventListener("dragover", (event) => {
-  if (draggingFiles(event)) event.preventDefault();
+  if (draggingFiles(event) || !inTextField(event)) event.preventDefault();
 });
 document.addEventListener("dragleave", () => {
   dragDepth = Math.max(0, dragDepth - 1);
   if (!dragDepth) $("drop-overlay").hidden = true;
 });
 document.addEventListener("drop", (event) => {
-  if (!draggingFiles(event)) return;
+  if (!draggingFiles(event)) {
+    if (!inTextField(event)) event.preventDefault();
+    return;
+  }
   event.preventDefault();
   dragDepth = 0;
   $("drop-overlay").hidden = true;

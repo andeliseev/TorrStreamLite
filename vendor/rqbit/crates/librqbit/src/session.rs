@@ -1810,9 +1810,28 @@ impl tracker_comms::TorrentStatsProvider for PeerRxTorrentInfo {
         use crate::torrent_state::stats::TorrentStatsState as TS;
         use tracker_comms::TrackerCommsStatsState as S;
 
+        // RAM storage selects no files, so these totals would say nothing is left: trackers
+        // would take us for a seeder, and many send seeders no other seeders. Report the
+        // whole torrent as wanted, less what's cached, and never complete.
+        let ram = mt.with_state(
+            |s| matches!(s, ManagedTorrentState::Live(l) if l.files.ram_cache_slots().is_some()),
+        );
+        let (downloaded_bytes, total_bytes) = if ram {
+            let total = mt
+                .with_metadata(|m| m.lengths().total_length())
+                .unwrap_or(0);
+            let cached = mt
+                .live()
+                .and_then(|l| l.get_hns())
+                .map_or(0, |h| h.have_bytes);
+            (cached.min(total.saturating_sub(1)), total)
+        } else {
+            (stats.progress_bytes, stats.total_bytes)
+        };
+
         tracker_comms::TrackerCommsStats {
-            downloaded_bytes: stats.progress_bytes,
-            total_bytes: stats.total_bytes,
+            downloaded_bytes,
+            total_bytes,
             uploaded_bytes: stats.uploaded_bytes,
             torrent_state: match stats.state {
                 TS::Initializing { .. } => S::Initializing,

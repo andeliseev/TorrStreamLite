@@ -75,10 +75,17 @@ with tempfile.TemporaryDirectory(prefix='torrstream-network-') as tmp:
             assert json.load(r)['CacheSize'] == 6 * 1048576
         with request(lan, '/torrents', json.dumps({'action': 'list'}).encode(), tv_app) as r:
             assert json.load(r)[0]['hash'] == torrent['hash']
+        # Lampa opened over plain HTTP on the TV works at the TV address.
+        with request(lan, '/settings', json.dumps({'action': 'get'}).encode(), dict(tv_app, Origin='http://lampa.mx')) as r:
+            assert r.headers['Access-Control-Allow-Origin'] == 'http://lampa.mx'
         refused = [(base, '/settings', {'action': 'get'}, tv_app),
                    (lan, '/api/torrents', {'link': 'invalid'}, tv_app),
                    (lan, '/settings', {'action': 'get'}, {'Host': 'rebind.example:8090'}),
-                   (base, '/api/status', None, {'Host': 'rebind.example'})]
+                   (base, '/api/status', None, {'Host': 'rebind.example'}),
+                   # Any device on the network can answer for a .local name.
+                   (base, '/api/status', None, {'Host': 'mac.local'}),
+                   # Other sites' video or image tags can't load the controls.
+                   (base, '/api/status', None, {'Sec-Fetch-Site': 'cross-site'})]
         for url, path, body, headers in refused:
             try: request(url, path, json.dumps(body).encode() if body else None, headers)
             except urllib.error.HTTPError as e: assert e.code == 403, (url, path, e.code)

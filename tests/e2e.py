@@ -182,6 +182,19 @@ def main():
     args=parser.parse_args()
     binary=str(Path(args.binary).resolve()); report=Path(args.report).resolve(); report.parent.mkdir(parents=True,exist_ok=True)
     swarm=Swarm(args.size_mib,args.corrupt_first,stalling_peer=args.stalling_peer,peers=args.peers,peer_mbps=args.peer_mbps)
+    # The Mac app passes a pipe as standard input; when the app ends, however it ends, so does the server.
+    with tempfile.TemporaryDirectory() as tmp:
+        orphan=subprocess.Popen([binary,'--listen','127.0.0.1:0','--no-dht','--exit-on-stdin-close'],cwd=tmp,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+        try:
+            for _ in range(100):
+                line=orphan.stdout.readline()
+                if not line or line.startswith('TORRSTREAM_LISTEN='): break
+            assert line.startswith('TORRSTREAM_LISTEN='), 'Server did not start'
+            orphan.stdin.close()
+            orphan.wait(timeout=5)
+        finally:
+            if orphan.poll() is None: orphan.kill(); raise AssertionError('The server outlived its app')
+    print('PASS the server exits when its app goes away',flush=True)
     with tempfile.TemporaryDirectory(prefix='torrstream-lite-e2e-') as tmp:
         log_path=report.with_suffix('.log')
         with log_path.open('w') as log:

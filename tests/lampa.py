@@ -95,12 +95,15 @@ def main():
                 assert 'Version 2.0, January 2004' in notices
             mark('Offline app and engine license notices; idle peer response')
 
-            for origin in ('http://lampa.mx', 'https://lampa.mx', 'http://lampa.app', 'https://lampa.app'):
+            for origin in ('https://lampa.mx', 'https://lampa.app'):
                 with request('/', origin=origin) as response:
                     assert response.status == 200
                 settings = api('/settings', {'action': 'get'}, origin=origin)
                 assert settings['CacheSize'] == 6 * 1048576 and not settings['UseDisk']
-            mark('Lampa ping and playback connection accept form-labelled JSON and Lampa web origins')
+            # Plain HTTP can be faked on the way: the Mac's own server takes Lampa only over HTTPS.
+            for origin in ('http://lampa.mx', 'http://lampa.app'):
+                error(403, '/settings', origin=origin, data={'action': 'get'})
+            mark("Lampa ping and playback connection accept form-labelled JSON and Lampa's HTTPS origins")
             # Any web page can send "null" from a sandboxed frame; the loopback server refuses it.
             error(403, '/settings', origin='null', data={'action': 'get'})
             error(403, '/torrents', origin='null', data={'action': 'list'})
@@ -199,6 +202,14 @@ def main():
             assert api('/viewed', {'action': 'list', 'hash': hash_value}) == []
             assert not list(Path(tmp).iterdir())
             mark('Stopping preload releases RAM and does not write payload/history files')
+
+            # Lampa plays by hash. After "drop" (or the idle release) the hash brings the torrent back.
+            with request(stream + '&play', headers={'Range': 'bytes=0-10002'}) as response:
+                assert response.status == 206
+                assert response.read() == payload(swarm.prefix, 10003)
+            assert api('/api/status', origin=base)['torrent']['hash'] == hash_value
+            api('/torrents', {'action': 'rem', 'hash': hash_value})
+            mark('A dropped torrent comes back when Lampa plays it by hash')
             report.write_text(json.dumps({'passed': passed, 'physical_tv_tested': False}, indent=2) + '\n')
         finally:
             process.terminate()

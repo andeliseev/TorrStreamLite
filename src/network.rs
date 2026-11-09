@@ -41,6 +41,13 @@ fn suitable_interface(name: &str, flags: u32, ip: Ipv4Addr) -> bool {
             "br-",
             "awdl",
             "llw",
+            // Internet Sharing and virtual machines: their clients aren't the home network.
+            "bridge",
+            "ap1",
+            "vmnet",
+            "vmenet",
+            "vboxnet",
+            "vnic",
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix))
@@ -258,6 +265,15 @@ mod tests {
         assert!(suitable_interface("en0", up, home));
         assert!(suitable_interface("eth0", up, Ipv4Addr::new(10, 0, 0, 2)));
         assert!(!suitable_interface("utun7", up, home));
+        assert!(
+            !suitable_interface("bridge100", up, home),
+            "Internet Sharing"
+        );
+        assert!(!suitable_interface("vmnet8", up, home), "a virtual machine");
+        assert!(
+            suitable_interface("br0", up, home),
+            "a router's own LAN bridge"
+        );
         assert!(!suitable_interface(
             "en0",
             up | libc::IFF_POINTOPOINT as u32,

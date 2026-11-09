@@ -934,7 +934,10 @@ impl TorrentStateLive {
         }
 
         let chunks = locked.get_chunks()?;
-        if chunks.is_finished() {
+        // RAM storage selects no files, so it always looks finished; it never is. Treating it
+        // as finished disconnected every seeder whenever a piece completed between a player's
+        // requests, like is_finished_and_no_active_streams once did.
+        if chunks.is_finished() && self.files.ram_cache_slots().is_none() {
             if chunks.get_selected_pieces()[id.get_usize()] {
                 locked.try_flush_bitv(&self.shared, false);
                 info!(id=self.shared.id, info_hash=?self.shared.info_hash, "torrent finished downloading");
@@ -1363,6 +1366,15 @@ impl PeerHandler {
                 }
             }
             PeerState::NotNeeded => {
+                // A peer can stop being needed while it still owns pieces; give them back.
+                let released = self
+                    .state
+                    .lock_write("release pieces of a peer not needed")
+                    .get_pieces_mut()?
+                    .release_pieces_owned_by(self.addr);
+                if released > 0 {
+                    self.state.new_pieces_notify.notify_waiters();
+                }
                 // Restore it as std::mem::take() replaced it above.
                 pe.value_mut().set_state(PeerState::NotNeeded, peers);
                 return Ok(());
@@ -1996,14 +2008,24 @@ impl PeerHandler {
 
             let full_piece_download_time = {
                 let mut g = state.lock_write("mark_chunk_downloaded");
-                let chunk_marking_result = g.get_pieces_mut()?.mark_chunk_downloaded(piece);
+                let pieces = g.get_pieces_mut()?;
+                let chunk_marking_result = pieces.mark_chunk_downloaded(piece);
+                if state.files.ram_cache_slots().is_some() {
+                    pieces.delivered_by(addr);
+                }
                 trace!(?piece, chunk_marking_result=?chunk_marking_result);
 
                 match chunk_marking_result {
                     Some(ChunkMarkingResult::Completed) => {
                         trace!("piece={} done, will write and checksum", piece.index);
                         // Remove from inflight to prevent others from stealing it during hash check.
-                        g.get_pieces_mut()?.take_inflight(chunk_info.piece_index)
+                        let pieces = g.get_pieces_mut()?;
+                        let taken_over = pieces
+                            .get_inflight(chunk_info.piece_index)
+                            .is_some_and(|p| p.taken_over);
+                        pieces
+                            .take_inflight(chunk_info.piece_index)
+                            .map(|time| (time, taken_over))
                     }
                     Some(ChunkMarkingResult::PreviouslyCompleted) => {
                         // TODO: we might need to send cancellations here.
@@ -2024,7 +2046,7 @@ impl PeerHandler {
             // It shouldn't impact perf anyway, but dropping just in case.
             drop(ppl_guard);
 
-            let full_piece_download_time = match full_piece_download_time {
+            let (full_piece_download_time, taken_over) = match full_piece_download_time {
                 Some(t) => t,
                 None => return Ok(()),
             };
@@ -2065,8 +2087,11 @@ impl PeerHandler {
                         Ordering::Relaxed,
                     );
 
-                    // Per-peer piece counters.
-                    counters.on_piece_completed(piece_len, full_piece_download_time);
+                    // Per-peer piece counters. A piece taken over from another peer would make
+                    // this one look faster than it is, and so take over more.
+                    if !taken_over {
+                        counters.on_piece_completed(piece_len, full_piece_download_time);
+                    }
                     state.peers.reset_peer_backoff(addr);
 
                     trace!(piece = index, "successfully downloaded and verified");

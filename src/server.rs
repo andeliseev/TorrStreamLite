@@ -15,7 +15,6 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    io::SeekFrom,
     net::{IpAddr, SocketAddr},
     sync::{
         Arc, Weak,
@@ -24,7 +23,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::AsyncReadExt,
     sync::{Mutex, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
@@ -40,6 +39,9 @@ pub struct AppState {
     pub started: Instant,
     pub client: reqwest::Client,
     pub tv: Mutex<crate::network::TvAccess>,
+    /// The hash and link of the torrent the idle timer or Lampa's "drop" released, in memory
+    /// only, so Lampa can play it again by its hash. Stop, "rem" and the next torrent clear it.
+    pub resume: parking_lot::Mutex<Option<(String, String)>>,
 }
 #[derive(Clone)]
 pub struct Active {
@@ -55,6 +57,8 @@ pub struct Active {
     timestamp: u64,
     viewed: Arc<parking_lot::Mutex<HashMap<usize, f64>>>,
     preload: Arc<parking_lot::Mutex<Option<Arc<Preload>>>>,
+    /// The link it was added with; none for a .torrent file.
+    link: Option<String>,
 }
 struct Preload {
     file: usize,
@@ -216,7 +220,7 @@ async fn request_guard(State(guard): State<Guard>, req: Request, next: Next) -> 
         .unwrap_or("")
         .to_owned();
     // Clients without a Host header aren't browsers, so they can't be a rebound page.
-    if !host.is_empty() && !host_allowed(&host, &config.allow_host) {
+    if !host.is_empty() && !host_allowed(&host, &config.allow_host, guard.lan) {
         return (
             StatusCode::FORBIDDEN,
             "Unknown host name. Use the server's IP address, or start it with --allow-host <name>",
@@ -243,11 +247,34 @@ async fn request_guard(State(guard): State<Guard>, req: Request, next: Next) -> 
     {
         return (StatusCode::FORBIDDEN, "Browser origin is not allowed").into_response();
     }
+    // Other sites can't read /api replies, but a <video> or <img> they show still loads one:
+    // it would take a reader slot or tell them what's playing.
+    if req.uri().path().starts_with("/api/") && cross_site(req.headers()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Pages on other sites can't use TorrStream Lite's controls",
+        )
+            .into_response();
+    }
     let mut response = if req.method() == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {
         next.run(req).await
     };
+    // No other site may show these pages in a frame and steer a click onto their switches.
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
     if let Some(origin) = origin {
         if let Ok(v) = origin.parse() {
             response
@@ -298,33 +325,54 @@ fn origin_allowed(origin: &str, host: &str, path: &str, configured: &[String], l
     compat
         && match origin {
             "null" => lan,
-            "http://lampa.mx" | "https://lampa.mx" | "http://lampa.app" | "https://lampa.app" => {
-                true
-            }
+            "https://lampa.mx" | "https://lampa.app" => true,
+            // Plain HTTP can be faked on the way, so only on listeners that face the TV.
+            "http://lampa.mx" | "http://lampa.app" => lan,
             _ => false,
         }
 }
 
-/// A page that rebinds its own domain to this server still sends that domain as
-/// the Host. Only IP addresses, localhost, mDNS `.local` names and names passed
-/// with `--allow-host` are accepted; none of these can be rebound from outside.
-fn host_allowed(host: &str, allowed: &[String]) -> bool {
-    let name = host_name(host);
+/// A page that rebinds its own domain to this server still sends that domain as the Host.
+/// Accepted: IP addresses, localhost and names passed with `--allow-host`, and mDNS `.local`
+/// names only on listeners that face the home network: any device there can answer for a
+/// `.local` name, and point it at the Mac's loopback server.
+fn host_allowed(host: &str, allowed: &[String], lan: bool) -> bool {
+    let Some(name) = host_name(host) else {
+        return false;
+    };
     let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
     !name.is_empty()
         && (name.parse::<IpAddr>().is_ok()
             || name == "localhost"
             || name.ends_with(".localhost")
-            || name.ends_with(".local")
+            || (lan && name.ends_with(".local"))
             || allowed.iter().any(|item| item.eq_ignore_ascii_case(&name)))
 }
 
-/// The name in a Host header: `[::1]:8090` → `::1`, `mac.local:8090` → `mac.local`.
-fn host_name(host: &str) -> &str {
-    match host.strip_prefix('[') {
-        Some(rest) => rest.split_once(']').map_or("", |(ip, _)| ip),
-        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+/// The name in a Host header: `[::1]:8090` → `::1`, `mac.local:8090` → `mac.local`. None
+/// for a malformed one: a port that isn't a number, or longer than any real host name (the
+/// playlist repeats the Host for every file).
+fn host_name(host: &str) -> Option<&str> {
+    if host.len() > 262 {
+        return None;
     }
+    let (name, port) = match host.strip_prefix('[') {
+        Some(rest) => {
+            let (ip, after) = rest.split_once(']')?;
+            match after {
+                "" => (ip, None),
+                _ => (ip, Some(after.strip_prefix(':')?)),
+            }
+        }
+        None => match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        },
+    };
+    let numeric = |port: &str| {
+        !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit())
+    };
+    port.is_none_or(numeric).then_some(name)
 }
 
 /// Browsers send fetch metadata; players and the native code of TV apps don't.
@@ -522,6 +570,19 @@ struct AddRequest {
     #[serde(default)]
     data: String,
 }
+/// Lampa plays a torrent by its info hash. A hash that matches the torrent released by the
+/// idle timer or Lampa's "drop" brings back the link it was added with; another hash becomes
+/// a magnet link that DHT can resolve.
+fn resume_link(remembered: &Option<(String, String)>, link: &str) -> String {
+    if link.len() == 40 && link.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let hash = link.to_ascii_lowercase();
+        return match remembered {
+            Some((released, original)) if *released == hash => original.clone(),
+            _ => format!("magnet:?xt=urn:btih:{hash}"),
+        };
+    }
+    link.to_owned()
+}
 async fn input_from_link(state: &AppState, link: &str) -> Result<AddTorrent<'static>> {
     ensure!(link.len() <= 16 * 1024, "Link is too long");
     if link.starts_with("magnet:?") {
@@ -568,9 +629,12 @@ async fn add(state: &Arc<AppState>, req: AddRequest, bytes: Option<Bytes>) -> Ap
             "Previous torrent is still releasing memory; retry shortly",
         ));
     }
-    let input = match bytes {
-        Some(b) => AddTorrent::TorrentFileBytes(b),
-        None => input_from_link(state, &req.link).await?,
+    let link = bytes
+        .is_none()
+        .then(|| resume_link(&state.resume.lock(), &req.link));
+    let input = match (bytes, &link) {
+        (Some(b), _) => AddTorrent::TorrentFileBytes(b),
+        (None, link) => input_from_link(state, link.as_deref().unwrap_or_default()).await?,
     };
     let result = tokio::time::timeout(
         Duration::from_secs(90),
@@ -619,8 +683,10 @@ async fn add(state: &Arc<AppState>, req: AddRequest, bytes: Option<Bytes>) -> Ap
         timestamp: now(),
         viewed: Default::default(),
         preload: Default::default(),
+        link,
     };
     let value = active_json(&active);
+    *state.resume.lock() = None;
     *state.active.lock().await = Some(active);
     Ok(value)
 }
@@ -633,12 +699,20 @@ async fn add_json(
 async fn add_file(State(state): State<Arc<AppState>>, bytes: Bytes) -> ApiResult<Json<Value>> {
     Ok(Json(add(&state, AddRequest::default(), Some(bytes)).await?))
 }
-async fn stop(state: &AppState) -> ApiResult<()> {
+/// `resume`: keep the torrent's link so Lampa can play it again by its hash (the idle
+/// release and Lampa's "drop"), rather than forget it (Stop and "rem").
+async fn stop(state: &AppState, resume: bool) -> ApiResult<()> {
     let _op = state
         .operation
         .try_lock()
         .map_err(|_| conflict("Another add/stop operation is running"))?;
     if let Some(active) = state.active.lock().await.take() {
+        let hash = active.handle.info_hash().as_string();
+        *state.resume.lock() = active
+            .link
+            .clone()
+            .filter(|_| resume)
+            .map(|link| (hash, link));
         active.cancel.cancel();
         state
             .session
@@ -655,7 +729,7 @@ async fn stop(state: &AppState) -> ApiResult<()> {
     Ok(())
 }
 async fn remove_active(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
-    stop(&state).await?;
+    stop(&state, false).await?;
     Ok(Json(json!({"ok":true})))
 }
 pub async fn idle_watchdog(weak: Weak<AppState>) {
@@ -673,7 +747,7 @@ pub async fn idle_watchdog(weak: Weak<AppState>) {
                     >= state.config.idle_seconds
         });
         if idle {
-            let _ = stop(&state).await;
+            let _ = stop(&state, true).await;
         }
     }
 }
@@ -759,21 +833,26 @@ async fn stream_file(
     if method == Method::HEAD || range.len == 0 {
         return Ok(builder.body(Body::empty()).unwrap());
     }
-    if let Some(preload) = active.preload.lock().as_ref() {
+    // Playback replaces a preload: its progress and any error no longer apply.
+    if let Some(preload) = active.preload.lock().take() {
         preload.cancel.cancel();
     }
-    let permit = active.readers.clone().try_acquire_owned().map_err(|_| {
+    // A cancelled preload gives its reader slot back a moment later.
+    let permit = tokio::time::timeout(
+        Duration::from_secs(2),
+        active.readers.clone().acquire_owned(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .ok_or_else(|| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
-            "Too many simultaneous range requests for this cache size".into(),
+            "Too many players are reading at once for this cache size. Close one, or choose a bigger cache.".into(),
         )
     })?;
     active.touched.store(now(), Ordering::Relaxed);
-    let mut reader = active.handle.clone().stream(file).await?;
-    reader
-        .seek(SeekFrom::Start(range.start))
-        .await
-        .map_err(anyhow::Error::from)?;
+    let mut reader = active.handle.clone().stream_from(file, range.start).await?;
     // One queued chunk bounds HTTP buffering. The producer observes cancellation
     // even when a slow player stops polling the response body.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<std::io::Result<Bytes>>(1);
@@ -841,7 +920,8 @@ async fn compat_torrents(
             let a = current(&state).await?;
             ensure_hash(&a, &req.hash)?;
             drop(a);
-            stop(&state).await?;
+            // TorrServer keeps a dropped torrent and removes a "rem" one.
+            stop(&state, req.action == "drop").await?;
             Ok(Json(json!({})))
         }
         "set" => {
@@ -875,7 +955,7 @@ async fn settings(
     if req.get("action").and_then(Value::as_str) != Some("get") {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "Change memory and peer limits with startup options; live resizing is disabled".into(),
+            "TorrStream Lite's settings can only be changed in the app. The cache size is in its Settings; peer limits are startup options.".into(),
         ));
     }
     Ok(Json(
@@ -1004,7 +1084,8 @@ fn start_preload(active: &Active, index: usize, cache_bytes: usize) -> ApiResult
         let _permit = permit;
         let result: Result<()> = tokio::select! {
             _ = preload.cancel.cancelled() => Ok(()),
-            result = tokio::time::timeout(Duration::from_secs(45), async {
+            // As long as a stream waits for a slow torrent.
+            result = tokio::time::timeout(Duration::from_secs(300), async {
                 let mut reader = active.handle.clone().stream(file).await?;
                 let mut buffer = vec![0; IO_CHUNK];
                 let mut loaded = 0;
@@ -1017,7 +1098,7 @@ fn start_preload(active: &Active, index: usize, cache_bytes: usize) -> ApiResult
                     active.touched.store(now(), Ordering::Relaxed);
                 }
                 Ok(())
-            }) => result.unwrap_or_else(|_| Err(anyhow::anyhow!("Preload timed out after 45 seconds"))),
+            }) => result.unwrap_or_else(|_| Err(anyhow::anyhow!("The torrent sent nothing to preload for 5 minutes"))),
         };
         if let Err(error) = result {
             *preload.error.lock() = Some(format!("{error:#}"));
@@ -1087,7 +1168,12 @@ async fn compat_stream(
         .get("index")
         .map(|s| s.parse::<usize>())
         .transpose()
-        .map_err(anyhow::Error::from)?
+        .map_err(|_| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                "The file index must be a number, starting at 1".into(),
+            )
+        })?
         .unwrap_or(1);
     if q.contains_key("preload") {
         start_preload(&active, index, state.factory.snapshot().budget_bytes)?;
@@ -1156,11 +1242,18 @@ mod tests {
         ] {
             assert!(origin_allowed(
                 origin,
-                "127.0.0.1:8090",
+                "192.168.1.35:8090",
                 "/settings",
                 &NONE,
-                false
+                true
             ));
+            // Plain HTTP can be faked on the way: not on the Mac's own server.
+            let secure = origin.starts_with("https:");
+            assert_eq!(
+                origin_allowed(origin, "127.0.0.1:8090", "/settings", &NONE, false),
+                secure,
+                "{origin}"
+            );
             assert!(!origin_allowed(
                 origin,
                 "127.0.0.1:8090",
@@ -1193,6 +1286,31 @@ mod tests {
     }
 
     #[test]
+    fn a_released_torrent_comes_back_from_its_hash() {
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        let remembered = Some((hash.to_owned(), "http://tracker/file.torrent".to_owned()));
+        assert_eq!(
+            resume_link(&remembered, &hash.to_ascii_uppercase()),
+            "http://tracker/file.torrent"
+        );
+        let other = "f".repeat(40);
+        assert_eq!(
+            resume_link(&remembered, &other),
+            format!("magnet:?xt=urn:btih:{other}")
+        );
+        assert_eq!(
+            resume_link(&None, hash),
+            format!("magnet:?xt=urn:btih:{hash}")
+        );
+        assert_eq!(resume_link(&remembered, "magnet:?xt=x"), "magnet:?xt=x");
+        assert_eq!(
+            resume_link(&remembered, &hash[1..]),
+            &hash[1..],
+            "not a hash"
+        );
+    }
+
+    #[test]
     fn refuses_host_names_a_rebound_page_would_send() {
         for host in [
             "127.0.0.1:8090",
@@ -1202,10 +1320,14 @@ mod tests {
             "localhost:8090",
             "LOCALHOST",
             "app.localhost:8090",
-            "macbook.local:8090",
-            "MacBook.local.:8090",
         ] {
-            assert!(host_allowed(host, &NONE), "{host}");
+            assert!(host_allowed(host, &NONE, false), "{host}");
+            assert!(host_allowed(host, &NONE, true), "{host}");
+        }
+        // Any device on the network can answer for a .local name.
+        for host in ["macbook.local:8090", "MacBook.local.:8090"] {
+            assert!(host_allowed(host, &NONE, true), "{host}");
+            assert!(!host_allowed(host, &NONE, false), "{host}");
         }
         for host in [
             "",
@@ -1215,12 +1337,18 @@ mod tests {
             "local:8090",
             "[::1:8090",
             "my.keenetic.net:8090",
+            "127.0.0.1:80x",
+            "127.0.0.1:",
+            "[::1]8090",
+            "::1",
         ] {
-            assert!(!host_allowed(host, &NONE), "{host}");
+            assert!(!host_allowed(host, &NONE, true), "{host}");
         }
+        let long = format!("127.0.0.1:{}", "9".repeat(400));
+        assert!(!host_allowed(&long, &NONE, true), "a port too long");
         let allowed = ["my.keenetic.net".to_owned()];
-        assert!(host_allowed("My.Keenetic.Net:8090", &allowed));
-        assert!(!host_allowed("keenetic.net", &allowed));
+        assert!(host_allowed("My.Keenetic.Net:8090", &allowed, false));
+        assert!(!host_allowed("keenetic.net", &allowed, false));
     }
 
     #[test]

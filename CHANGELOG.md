@@ -4,6 +4,12 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+- Steadier playback from public torrents: peers that have the whole torrent no longer disconnect between a player's requests, and trackers now see the app as downloading, so they send it those peers too.
+- Lampa can play a torrent again after the app released it for sitting idle, or after Lampa dropped it.
+- Closed ways for web pages, and for other devices on the same network, to reach the app's controls.
+- The streaming server now quits with the app, even after a crash or Force Quit.
+- Right-clicking the window no longer offers Back and Reload, which could leave it blank or bring back an old home network setting.
+
 ## 0.2.4 (2026-11-09)
 
 - **Settings → Cache:** choose 96, 192 or 256 MiB. More cache keeps more of the video around where you're watching, for smoother playback on slow torrents and quicker seeks back. A change applies to the next torrent you add.

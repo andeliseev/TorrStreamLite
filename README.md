@@ -81,7 +81,7 @@ TorrStream Lite runs on your computer. It has no account, no analytics and no se
 
 - **Torrent traffic:** like any torrent app, it connects to the trackers and peers of the torrent you add, and to the DHT network that helps find peers. They see your IP address.
 - **Torrent URLs:** when you add a torrent by its URL, the app downloads the .torrent file from that address.
-- **Nothing is kept:** the video is released when you stop the torrent or quit. Watched positions from TV apps last only until the torrent is stopped.
+- **Nothing is kept:** the video is released when you stop the torrent or quit. Watched positions from TV apps last only until the torrent is stopped. When nothing has played for five minutes, or a TV app drops the torrent, the app keeps only its link in memory, so the TV app can play it again; Stop, another torrent or quitting forgets it.
 - **Settings:** the Mac app saves only the home network switch and port, the cache size, the appearance, and the window's size and position.
 
 Read the full [privacy policy](https://andeliseev.github.io/torrstream-lite/privacy.html).

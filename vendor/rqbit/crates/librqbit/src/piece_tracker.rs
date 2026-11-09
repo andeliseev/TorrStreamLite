@@ -30,12 +30,13 @@ use crate::{
 pub struct InflightPiece {
     pub peer: PeerHandle,
     pub started: Instant,
-    /// When its owner last delivered a chunk of it (or took it, if none yet).
-    pub last_progress: Instant,
+    /// Taken over from another peer, so its time says little about this peer's speed.
+    pub taken_over: bool,
 }
 
-/// In RAM mode, a piece whose owner has sent none of it for this long goes to the next
-/// peer that asks: the owner choked us or stopped, and a reader is probably waiting.
+/// In RAM mode, a piece whose owner has sent nothing at all for this long, since it took the
+/// piece, goes to the next peer that asks: the owner choked us or stopped. The owner's last
+/// chunk of any piece counts, since a new piece's first chunk waits behind its earlier requests.
 pub(crate) const RAM_STALL: Duration = Duration::from_secs(5);
 
 /// A piece handed to a peer by the RAM scheduler.
@@ -210,6 +211,8 @@ pub struct PieceTracker {
     chunks: ChunkTracker,
     inflight: HashMap<ValidPieceIndex, InflightPiece>,
     verifying: HashSet<ValidPieceIndex>,
+    /// When each live peer last delivered a chunk, for the RAM stall rule.
+    last_delivery: HashMap<PeerHandle, Instant>,
 }
 
 impl PieceTracker {
@@ -221,6 +224,7 @@ impl PieceTracker {
             chunks,
             inflight: HashMap::new(),
             verifying: HashSet::new(),
+            last_delivery: HashMap::new(),
         }
     }
 
@@ -298,13 +302,12 @@ impl PieceTracker {
     /// Reserve a piece: remove from queue, add to inflight.
     fn reserve_piece(&mut self, piece: ValidPieceIndex, peer: PeerHandle) -> AcquireResult {
         self.chunks.reserve_needed_piece(piece);
-        let now = Instant::now();
         self.inflight.insert(
             piece,
             InflightPiece {
                 peer,
-                started: now,
-                last_progress: now,
+                started: Instant::now(),
+                taken_over: false,
             },
         );
         AcquireResult::Reserved(piece)
@@ -344,7 +347,6 @@ impl PieceTracker {
         let info = self.inflight.get_mut(&piece)?;
         info.peer = req.peer;
         info.started = Instant::now();
-        info.last_progress = info.started;
 
         Some(AcquireResult::Stolen {
             piece,
@@ -359,6 +361,11 @@ impl PieceTracker {
     /// Returns download duration if piece was in-flight.
     /// Note: Does NOT mark the piece as downloaded - caller should do hash check
     /// and then call `mark_piece_hash_ok` or `mark_piece_hash_failed`.
+    /// Notes that `peer` delivered a chunk, for the RAM stall rule.
+    pub(crate) fn delivered_by(&mut self, peer: PeerHandle) {
+        self.last_delivery.insert(peer, Instant::now());
+    }
+
     pub fn take_inflight(&mut self, piece: ValidPieceIndex) -> Option<Duration> {
         let inflight = self.inflight.remove(&piece)?;
         self.verifying.insert(piece);
@@ -480,7 +487,12 @@ impl PieceTracker {
             .filter_map(|(&p, info)| {
                 let rank = window.rank(p.get())?;
                 let limit = if rank == 0 { urgent_after } else { slow_after };
-                let stuck = info.last_progress.elapsed() >= RAM_STALL
+                // Quiet: the owner sent nothing at all since it took the piece.
+                let heard = self
+                    .last_delivery
+                    .get(&info.peer)
+                    .map_or(info.started, |&at| at.max(info.started));
+                let stuck = heard.elapsed() >= RAM_STALL
                     || limit.is_some_and(|limit| info.started.elapsed() >= limit);
                 stuck.then_some((rank, p))
             })
@@ -489,7 +501,7 @@ impl PieceTracker {
         let info = self.inflight.get_mut(&piece)?;
         let from_peer = std::mem::replace(&mut info.peer, peer);
         info.started = Instant::now();
-        info.last_progress = info.started;
+        info.taken_over = true;
         Some(RamAcquired::Stolen { piece, from_peer })
     }
 
@@ -506,6 +518,7 @@ impl PieceTracker {
             .map(|(p, _)| *p)
             .collect();
 
+        self.last_delivery.remove(&peer);
         let count = pieces_to_release.len();
         for piece in pieces_to_release {
             self.inflight.remove(&piece);
@@ -540,11 +553,6 @@ impl PieceTracker {
         &mut self,
         piece: &Piece<ByteBuf<'_>>,
     ) -> Option<ChunkMarkingResult> {
-        if let Some(index) = self.chunks.get_lengths().validate_piece_index(piece.index)
-            && let Some(inflight) = self.inflight.get_mut(&index)
-        {
-            inflight.last_progress = Instant::now();
-        }
         self.chunks.mark_chunk_downloaded(piece)
     }
 
@@ -1080,9 +1088,9 @@ mod tests {
         let (p0, p1) = (index(&tracker, 0), index(&tracker, 1));
         tracker.reserve_piece(p0, peer(1));
         tracker.reserve_piece(p1, peer(1));
-        // Peer 1 choked us: nothing of either piece for RAM_STALL.
+        // Peer 1 took both pieces RAM_STALL ago and has sent nothing since: it choked us.
         for p in [p0, p1] {
-            tracker.inflight.get_mut(&p).unwrap().last_progress -= RAM_STALL;
+            tracker.inflight.get_mut(&p).unwrap().started -= RAM_STALL;
         }
 
         // Peer 2 has no history yet, and takes the piece the reader is at first.
@@ -1094,21 +1102,35 @@ mod tests {
                 from_peer: peer(1)
             })
         );
-        assert_eq!(tracker.get_inflight(p0).unwrap().peer, peer(2));
+        let taken = tracker.get_inflight(p0).unwrap();
+        assert_eq!(taken.peer, peer(2));
+        assert!(
+            taken.taken_over,
+            "its time won't count toward peer 2's average"
+        );
         assert_eq!(tracker.get_inflight(p1).unwrap().peer, peer(1));
     }
 
     #[test]
-    fn ram_piece_with_recent_progress_stays_with_its_peer() {
+    fn a_piece_stays_with_a_peer_that_keeps_sending() {
         let mut tracker = PieceTracker::new(make_test_chunk_tracker(5));
-        let p0 = index(&tracker, 0);
+        let (p0, p1) = (index(&tracker, 0), index(&tracker, 1));
         tracker.reserve_piece(p0, peer(1));
-        tracker.inflight.get_mut(&p0).unwrap().last_progress -= RAM_STALL;
-        tracker.mark_chunk_downloaded(&Piece::from_data(0, 0, &[0; 16384]));
+        tracker.reserve_piece(p1, peer(1));
+        for p in [p0, p1] {
+            tracker.inflight.get_mut(&p).unwrap().started -= RAM_STALL;
+        }
+        // Nothing of piece 1 has come yet, but peer 1 is still sending piece 0: a slow peer's
+        // new piece waits behind its earlier requests.
+        tracker.delivered_by(peer(1));
 
         let got = tracker.steal_ram_piece(peer(2), None, &window(), 10.0, &|_| true, &|_| true);
         assert_eq!(got, None);
-        assert_eq!(tracker.get_inflight(p0).unwrap().peer, peer(1));
+        assert_eq!(tracker.get_inflight(p1).unwrap().peer, peer(1));
+
+        // Once the peer is gone, its record goes too.
+        tracker.release_pieces_owned_by(peer(1));
+        assert!(tracker.last_delivery.is_empty());
     }
 
     #[test]

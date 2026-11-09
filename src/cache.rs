@@ -159,8 +159,8 @@ impl RamCache {
         let slots = budget / piece_len;
         ensure!(
             slots >= 3,
-            "This torrent uses {} MiB pieces. The RAM cache must hold at least three pieces; increase --cache-mib or choose a smaller-piece torrent",
-            piece_len / (1 << 20)
+            "This torrent's pieces are {} MiB, and the cache must hold at least three of them. Choose a bigger cache (Settings → Cache in the Mac app, or --cache-mib), or a torrent with smaller pieces.",
+            piece_len.div_ceil(1 << 20)
         );
         let size = slots
             .checked_mul(piece_len)

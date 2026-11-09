@@ -50,12 +50,13 @@ A .torrent file dropped anywhere on the window is added, and so is a magnet link
 
 - It starts `Contents/Resources/torrstream-lite --listen 127.0.0.1:0 --cache-mib <size>` with the saved cache size (96 by default), waits for the `TORRSTREAM_LISTEN=` line and loads that address. Until then a startup screen in the window's colors shows.
 - The window has a transparent titlebar over the page (`fullSizeContentView`). A transparent view covers the titlebar band, so dragging there moves the window and a double-click zooms or minimizes it, as set in System Settings. The window and the web view's background match the page, so resizing doesn't flash. The size and position are remembered; the minimum is 720 × 520.
-- Navigation is allowed only to the server's origin. `torrstream-player://play?url=…` and `vlc://…` links open the stream in VLC, or in IINA when VLC isn't installed.
+- Navigation is allowed only to the server's origin, and never back or forward; the context menu has no Back, Forward or Reload. `torrstream-player://play?url=…` links open the stream in VLC, or in IINA when VLC isn't installed, and only when the URL is the server's own stream address. If WebKit's page process ends, the page loads again.
+- It starts the server with `--exit-on-stdin-close` and keeps a pipe on its standard input: when the app ends, however it ends, the server exits too.
 - Menus: About (the standard panel), Settings… (⌘,), Hide (⌘H), Quit; File → Open Torrent File… (⌘O) and Close Window (⌘W); Edit; Window → Minimize (⌘M) and Zoom.
 - The web view's data store is non-persistent, so the page's cache and storage stay in memory.
 - Settings are saved in `UserDefaults` under the bundle identifier `com.andeliseev.torrstream-lite`, and the server inside the app is signed as `com.andeliseev.torrstream-lite.server`. Versions up to 0.2.3 used `local.torrstream-lite.mac`; at its first launch the app moves those settings over and deletes what WebKit kept on disk for that version.
 
-At document start it sets these globals for the page:
+At document start it sets these globals for the page, from the saved settings. The script is rebuilt whenever a setting is saved, so a page that loads again never gets an old value:
 
 | Global | Contents |
 | --- | --- |

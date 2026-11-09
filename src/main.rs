@@ -38,6 +38,10 @@ pub struct Config {
     /// 8090 is the port TorrServer apps expect.
     #[arg(long, default_value_t = 8090, value_parser = clap::value_parser!(u16).range(1024..))]
     tv_port: u16,
+    /// Exit when standard input closes. The Mac app passes a pipe, so the server never
+    /// outlives it, even after a crash or Force Quit.
+    #[arg(long)]
+    exit_on_stdin_close: bool,
 }
 
 fn main() -> Result<()> {
@@ -103,6 +107,7 @@ async fn run(config: Config) -> Result<()> {
         operation: Mutex::new(()),
         started: std::time::Instant::now(),
         tv: Mutex::new(network::TvAccess::new(config.tv_port)),
+        resume: Default::default(),
         client: reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -119,22 +124,41 @@ async fn run(config: Config) -> Result<()> {
     let network_watch = tokio::spawn(network::watch(Arc::downgrade(&state), shutdown.clone()));
     // A listener on a LAN address (the router build) serves TVs directly.
     let lan = !config.listen.ip().is_loopback();
+    let parent_gone = tokio_util::sync::CancellationToken::new();
+    if config.exit_on_stdin_close {
+        let gone = parent_gone.clone();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 256];
+            while let Ok(read) = std::io::Read::read(&mut std::io::stdin(), &mut buffer) {
+                if read == 0 {
+                    break;
+                }
+            }
+            gone.cancel();
+            // A player still holding a stream must not keep an orphan alive.
+            std::thread::sleep(Duration::from_secs(10));
+            std::process::exit(0);
+        });
+    }
     axum::serve(
         listener,
         server::router(state.clone(), lan).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        #[cfg(unix)]
-        {
-            let mut term =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("signal handler");
-            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = tokio::signal::ctrl_c().await;
-        }
+        let signal = async {
+            #[cfg(unix)]
+            {
+                let mut term =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("signal handler");
+                tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        };
+        tokio::select! { _ = signal => {}, _ = parent_gone.cancelled() => {} }
         shutdown.cancel();
         state.tv.lock().await.stop();
         if let Some(active) = state.active.lock().await.as_ref() {

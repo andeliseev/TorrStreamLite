@@ -417,6 +417,17 @@ impl ManagedTorrent {
     }
 
     pub async fn stream(self: Arc<Self>, file_id: usize) -> anyhow::Result<FileStream> {
+        self.stream_from(file_id, 0).await
+    }
+
+    /// A stream that starts at `start`. Creating one at 0 and seeking would first ask peers
+    /// for the start of the file, and with every peer free to take a piece that can push
+    /// useful pieces out of a RAM cache.
+    pub async fn stream_from(
+        self: Arc<Self>,
+        file_id: usize,
+        start: u64,
+    ) -> anyhow::Result<FileStream> {
         // Streams need live or paused state, so wait out the initial check
         // of existing data instead of failing while it runs.
         self.wait_until_initialized().await?;
@@ -429,13 +440,14 @@ impl ManagedTorrent {
             |_fd, fi| (fi.len, fi.offset_in_torrent),
             &metadata,
         )?;
+        anyhow::ensure!(start <= fd_len, "start is past the end of the file");
         let streams = self.streams()?;
         let blocking_permit = self.shared().spawner.semaphore().acquire_owned().await?;
         let s = FileStream {
             stream_id: streams.next_id(),
             streams: streams.clone(),
             file_id,
-            position: 0,
+            position: start,
 
             file_len: fd_len,
             file_torrent_abs_offset: fd_offset,
@@ -447,7 +459,7 @@ impl ManagedTorrent {
             s.stream_id,
             StreamState {
                 file_id,
-                position: 0,
+                position: start,
                 waker: None,
                 file_len: fd_len,
                 file_abs_offset: fd_offset,

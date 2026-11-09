@@ -23,6 +23,20 @@ final class TitlebarDragView: NSView {
   }
 }
 
+/// The page has one address: no Back, Forward or Reload in its context menu. A reload would
+/// also rerun the page's start-up, and a back step would leave the startup screen showing.
+final class PageView: WKWebView {
+  override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+    super.willOpenMenu(menu, with: event)
+    let navigation = [
+      "WKMenuItemIdentifierGoBack", "WKMenuItemIdentifierGoForward", "WKMenuItemIdentifierReload",
+    ]
+    for item in menu.items where navigation.contains(item.identifier?.rawValue ?? "") {
+      menu.removeItem(item)
+    }
+  }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
   WKScriptMessageHandler
 {
@@ -32,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   var quitting = false
   var startupText = ""
   var serverURL: URL?
+  var titlebar: CGFloat = 28
+  /// The server's standard input. It closes when this app ends, however it ends, and the
+  /// server then exits too (--exit-on-stdin-close).
+  var serverInput: Pipe?
 
   /// The page's main background, so nothing flashes while it loads or the window resizes.
   static let pageBackground = NSColor(name: nil) { appearance in
@@ -40,11 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    let defaults = UserDefaults.standard
-    let theme =
-      ["light", "dark"].contains(defaults.string(forKey: "appearance"))
-      ? defaults.string(forKey: "appearance")! : "system"
-    applyAppearance(theme)
+    applyAppearance(savedTheme())
     NSApp.mainMenu = makeMenu()
 
     // The page runs under a transparent titlebar: one surface, with the window
@@ -60,25 +74,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     window.backgroundColor = Self.pageBackground
     let content = window.contentView!
     let measured = content.bounds.height - window.contentLayoutRect.height
-    let titlebar = measured > 0 ? measured : 28
+    titlebar = measured > 0 ? measured : 28
 
-    let tvEnabled = defaults.bool(forKey: "tvAccessEnabled")
-    let storedPort = defaults.integer(forKey: "tvAccessPort")
-    let tvPort = (1024...65535).contains(storedPort) ? storedPort : 8090
     let configuration = WKWebViewConfiguration()
     // Like the video, the page's cache and storage stay in memory, never on disk.
     configuration.websiteDataStore = .nonPersistent()
-    configuration.userContentController.addUserScript(
-      WKUserScript(
-        source: """
-          window.torrstreamDesktop = true;
-          window.torrstreamTV = {enabled: \(tvEnabled), port: \(tvPort)};
-          window.torrstreamTheme = "\(theme)";
-          document.documentElement.style.setProperty("--titlebar", "\(Int(titlebar))px");
-          """,
-        injectionTime: .atDocumentStart, forMainFrameOnly: true))
     configuration.userContentController.add(self, name: "desktop")
-    web = WKWebView(frame: content.bounds, configuration: configuration)
+    web = PageView(frame: content.bounds, configuration: configuration)
+    installPageScript()
     web.autoresizingMask = [.width, .height]
     web.navigationDelegate = self
     web.uiDelegate = self
@@ -103,6 +106,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
     startServer()
+  }
+
+  func savedTheme() -> String {
+    let theme = UserDefaults.standard.string(forKey: "appearance") ?? ""
+    return ["light", "dark"].contains(theme) ? theme : "system"
+  }
+
+  /// The saved settings the page starts with. Rebuilt after every change, so a page that
+  /// loads again (after WebKit's page process ends, say) never brings back an old value,
+  /// such as the home network switch.
+  func installPageScript() {
+    let defaults = UserDefaults.standard
+    let tvEnabled = defaults.bool(forKey: "tvAccessEnabled")
+    let storedPort = defaults.integer(forKey: "tvAccessPort")
+    let tvPort = (1024...65535).contains(storedPort) ? storedPort : 8090
+    let controller = web.configuration.userContentController
+    controller.removeAllUserScripts()
+    controller.addUserScript(
+      WKUserScript(
+        source: """
+          window.torrstreamDesktop = true;
+          window.torrstreamTV = {enabled: \(tvEnabled), port: \(tvPort)};
+          window.torrstreamTheme = "\(savedTheme())";
+          document.documentElement.style.setProperty("--titlebar", "\(Int(titlebar))px");
+          """,
+        injectionTime: .atDocumentStart, forMainFrameOnly: true))
   }
 
   func makeMenu() -> NSMenu {
@@ -174,13 +203,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // Settings → Cache, saved by the page; 96 MiB unless chosen otherwise.
     let savedCache = UserDefaults.standard.integer(forKey: "cacheMiB")
     let cacheMiB = (4...256).contains(savedCache) ? savedCache : 96
-    process.arguments = ["--listen", "127.0.0.1:0", "--cache-mib", String(cacheMiB)]
+    process.arguments = [
+      "--listen", "127.0.0.1:0", "--cache-mib", String(cacheMiB), "--exit-on-stdin-close",
+    ]
+    let input = Pipe()
+    process.standardInput = input
+    serverInput = input
     let pipe = Pipe()
     process.standardOutput = pipe
     process.standardError = pipe
     pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
       let data = handle.availableData
-      guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+      // At the end of the output the handler would be called again and again.
+      guard !data.isEmpty else {
+        handle.readabilityHandler = nil
+        return
+      }
+      guard let text = String(data: data, encoding: .utf8) else { return }
       DispatchQueue.main.async {
         guard let self = self else { return }
         self.startupText = String((self.startupText + text).suffix(8192))
@@ -276,6 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       {
         UserDefaults.standard.set(enabled, forKey: "tvAccessEnabled")
         UserDefaults.standard.set(port, forKey: "tvAccessPort")
+        installPageScript()
       }
     case "saveCacheSize":
       if let mib = body["mib"] as? Int, (4...256).contains(mib) {
@@ -285,6 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       if let theme = body["theme"] as? String, ["system", "light", "dark"].contains(theme) {
         UserDefaults.standard.set(theme, forKey: "appearance")
         applyAppearance(theme)
+        installPageScript()
       }
     case "copy":
       if let text = body["text"] as? String, text.count <= 8192 {
@@ -311,21 +352,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
   ) {
-    guard let url = navigationAction.request.url else {
+    guard let url = navigationAction.request.url, navigationAction.navigationType != .backForward
+    else {
       decisionHandler(.cancel)
       return
     }
-    if url.scheme == "torrstream-player" || url.scheme == "vlc" {
+    if url.scheme == "torrstream-player" {
       let raw =
-        url.scheme == "torrstream-player"
-        ? (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: {
           $0.name == "url"
-        })?.value ?? "")
-        : String(url.absoluteString.dropFirst("vlc://".count))
+        })?.value ?? ""
+      // Only this server's own stream addresses go to a player, whatever a link or a
+      // dropped URL says.
+      guard let streamURL = URL(string: raw), isOwnStream(streamURL) else {
+        decisionHandler(.cancel)
+        return
+      }
       let player =
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: "org.videolan.vlc")
         ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.colliderli.iina")
-      if let streamURL = URL(string: raw), let player = player {
+      if let player = player {
         NSWorkspace.shared.open(
           [streamURL], withApplicationAt: player, configuration: NSWorkspace.OpenConfiguration()
         ) { _, error in
@@ -339,12 +385,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
       decisionHandler(.cancel)
       return
     }
-    if url.scheme == "about" || (url.host == "127.0.0.1" && url.port == serverURL?.port) {
+    // about: only for the startup screen, before the server answers.
+    if (url.scheme == "about" && serverURL == nil)
+      || (url.host == "127.0.0.1" && url.port == serverURL?.port)
+    {
       decisionHandler(.allow)
     } else {
       decisionHandler(.cancel)
     }
   }
+  func isOwnStream(_ url: URL) -> Bool {
+    url.scheme == "http" && url.host == "127.0.0.1" && url.port != nil
+      && url.port == serverURL?.port
+      && url.user == nil && url.password == nil
+      && (url.path == "/stream" || url.path.hasPrefix("/stream/")
+        || url.path.hasPrefix("/api/stream/"))
+  }
+
+  /// WebKit's page process ended (a crash, or memory pressure): show the page again.
+  func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    if let url = serverURL { webView.load(URLRequest(url: url)) }
+  }
+
   func webView(
     _ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void
