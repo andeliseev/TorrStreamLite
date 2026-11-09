@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+- While a magnet link loads, the window counts the peers found and those that didn't answer. If it doesn't load, the window says why: no peers were found, or none answered. That includes torrents opened in Lampa, which shows only its own timeout. The app now gives up after 85 seconds instead of 90, before Lampa does.
+
 ## 0.2.7 (2026-11-09)
 
 - Fixed seeks that took a long time or never started after a pause, or once the cache had filled. The app disconnected peers that had nothing to send yet, and a seek then waited, sometimes minutes, for them to be tried again.

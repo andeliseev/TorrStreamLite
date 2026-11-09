@@ -36,6 +36,12 @@ def main():
     # Two more torrents: the next one Lampa opens, and one whose magnet link resolves slowly.
     other = Swarm(24)
     slow = Swarm(16, metadata_delay=3)
+    # Magnet links whose details never come: the only peer is gone, or there are no peers.
+    gone = Swarm(8)
+    for server in gone.serving:
+        server.shutdown()
+        server.server_close()
+    empty = Swarm(8, peers=0)
     # Delay payload, not metadata. Preload must acknowledge before data arrives.
     data_at = swarm.data_at
     def delayed_payload(offset, length):
@@ -51,7 +57,7 @@ def main():
         log = report.with_suffix('.log')
         with log.open('w') as output:
             process = subprocess.Popen([binary, '--listen', '127.0.0.1:0',
-                                        '--cache-mib', '6', '--no-dht'],
+                                        '--cache-mib', '6', '--no-dht', '--lookup-seconds', '8'],
                                        cwd=tmp, stdout=output, stderr=output)
         try:
             for _ in range(200):
@@ -255,6 +261,39 @@ def main():
                 assert status['torrent'] is None and not status['resolving'], status
                 assert status['cache']['allocated_bytes'] == 0, status
             mark('Dropping or stopping a torrent that is still resolving cancels it at once')
+
+            # Lampa only times out when a magnet link's details don't come, so the window says why.
+            def magnet_of(s):
+                return 'magnet:?xt=urn:btih:' + s.info_hash.hex() + '&tr=' + urllib.parse.quote(s.tracker_url, safe='')
+            api('/torrents', lampa_add(magnet_of(gone), 'Gone movie'), timeout=5)
+            for _ in range(100):
+                lookup = api('/api/status', origin=base)['lookup']
+                if lookup and lookup['peers_failed']:
+                    break
+                time.sleep(.1)
+            assert lookup['peers_found'] == lookup['peers_asked'] == lookup['peers_failed'] == 1, lookup
+            started = time.monotonic()
+            while api('/api/status', origin=base)['resolving']:
+                assert time.monotonic() - started < 15, 'The lookup never gave up'
+                time.sleep(.2)
+            status = api('/api/status', origin=base)
+            assert status['lookup'] is None and status['torrent'] is None, status
+            assert status['add_error'] == ("“[LAMPA] Gone movie” didn't load. Couldn't get the torrent's "
+                                           "details: the one peer found in 8 seconds didn't answer. It may be "
+                                           "offline, or out of reach through a VPN."), status
+            error(404, '/torrents', data={'action': 'get', 'hash': gone.info_hash.hex()})
+            # The window's own add says why in its reply, and clears the last one's reason.
+            try:
+                request('/api/torrents', {'link': magnet_of(empty)}, origin=base,
+                        headers={'Content-Type': 'application/json'}, timeout=20)
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 504, exc.code
+                reason = json.load(exc)['error']
+            else:
+                raise AssertionError('A magnet link with no peers was added')
+            assert reason.startswith("Couldn't get the torrent's details: no peers were found in 8 seconds"), reason
+            assert api('/api/status', origin=base)['add_error'] is None
+            mark('A magnet link whose details never come says why: no peers found, or none answered')
             report.write_text(json.dumps({'passed': passed, 'physical_tv_tested': False}, indent=2) + '\n')
         finally:
             process.terminate()
@@ -263,7 +302,7 @@ def main():
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-            for s in (swarm, other, slow):
+            for s in (swarm, other, slow, gone, empty):
                 s.close()
 
 

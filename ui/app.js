@@ -8,6 +8,7 @@ let current = null,
   filesRun = 0,
   loading = false,
   resolving = false,
+  lookup = null,
   statusBusy = false,
   playing = null,
   dismissedError = "";
@@ -124,9 +125,19 @@ function showAddState() {
       ? "Adding a torrent…"
       : "Add a torrent";
     $("torrent-meta").textContent = busy
-      ? "Looking up the torrent"
+      ? lookupText()
       : "Paste a magnet link or open a .torrent file";
   }
+}
+// While a magnet link's details are on the way: the peers found, and how many didn't answer.
+function lookupText() {
+  if (!lookup) return "Looking up the torrent";
+  const found = lookup.peers_found;
+  if (!found) return "Looking for peers";
+  const text = found + (found === 1 ? " peer found" : " peers found");
+  return lookup.peers_failed
+    ? text + ", " + lookup.peers_failed + " didn't answer"
+    : text + ", asking for its details";
 }
 async function add(options, path = "/api/torrents") {
   setLoading(true);
@@ -522,6 +533,7 @@ async function refresh() {
     const s = await api("/api/status");
     const t = s.torrent;
     resolving = Boolean(s.resolving);
+    lookup = s.lookup || null;
     const speed = mbps(t?.download_speed) + " <small>Mbps</small>";
     $("speed").innerHTML = speed;
     $("peer-total").innerHTML = speed;
@@ -549,7 +561,8 @@ async function refresh() {
     $("app-version").textContent = s.version;
     showCacheSetting(s.cache_setting_mib);
     showTorrent(t);
-    const error = t?.error || t?.preload_error || "";
+    // A torrent Lampa added that didn't load: Lampa shows only its own timeout.
+    const error = t?.error || t?.preload_error || (!t && s.add_error) || "";
     if (loading || resolving) setState("busy", "Adding torrent…");
     else if (!t) setState("idle", "Idle");
     else if (error) setState("error", "Torrent error");

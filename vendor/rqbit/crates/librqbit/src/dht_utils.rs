@@ -1,4 +1,11 @@
-use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashSet,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use anyhow::Context;
 use buffers::ByteBufOwned;
@@ -11,6 +18,37 @@ use crate::{
     stream_connect::StreamConnector,
 };
 use librqbit_core::hash_id::Id20;
+
+/// How a magnet link's lookup is going, so a caller can say why the torrent's details
+/// didn't come: the peers trackers and the DHT gave, and how many of them were asked and
+/// failed.
+#[derive(Debug, Default)]
+pub struct MetadataLookup {
+    found: AtomicUsize,
+    asked: AtomicUsize,
+    failed: AtomicUsize,
+}
+
+/// A snapshot of a [`MetadataLookup`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataLookupCounts {
+    /// Peers trackers and the DHT gave, each once; at most 256 are kept.
+    pub found: usize,
+    /// Peers asked for the details so far, four at a time.
+    pub asked: usize,
+    /// Peers asked that couldn't be reached, didn't answer, or sent no details.
+    pub failed: usize,
+}
+
+impl MetadataLookup {
+    pub fn counts(&self) -> MetadataLookupCounts {
+        MetadataLookupCounts {
+            found: self.found.load(Ordering::Relaxed),
+            asked: self.asked.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+        }
+    }
+}
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -35,18 +73,22 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     peer_connection_options: Option<PeerConnectionOptions>,
     connector: Arc<StreamConnector>,
     client_name_and_version: String,
+    lookup: Option<Arc<MetadataLookup>>,
 ) -> ReadMetainfoResult<A> {
     let mut seen = HashSet::<SocketAddr>::new();
     let mut addrs = addrs_stream;
+    let lookup = lookup.unwrap_or_default();
 
     let semaphore = tokio::sync::Semaphore::new(4);
 
     let read_info_guarded = |addr| {
         let semaphore = &semaphore;
+        let lookup = &lookup;
         let connector = connector.clone();
         let client_name_and_version = client_name_and_version.clone();
         async move {
             let token = semaphore.acquire().await?;
+            lookup.asked.fetch_add(1, Ordering::Relaxed);
             let ret = peer_info_reader::read_metainfo_from_peer(
                 addr,
                 peer_id,
@@ -61,6 +103,9 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
             .instrument(debug_span!("read_metainfo_from_peer", ?addr))
             .await
             .with_context(|| format!("error reading metainfo from {addr}"));
+            if ret.is_err() {
+                lookup.failed.fetch_add(1, Ordering::Relaxed);
+            }
             drop(token);
             ret
         }
@@ -72,6 +117,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
         seen.insert(a);
         unordered.push(read_info_guarded(a));
     }
+    lookup.found.store(seen.len(), Ordering::Relaxed);
 
     let mut addrs_completed = false;
 
@@ -95,6 +141,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
                 match next_addr {
                     Some(addr) => {
                         if seen.len() < 256 && seen.insert(addr) {
+                            lookup.found.fetch_add(1, Ordering::Relaxed);
                             unordered.push(read_info_guarded(addr));
                         }
                         continue;
@@ -146,6 +193,7 @@ mod tests {
             None,
             Arc::new(StreamConnector::new(Default::default()).await.unwrap()),
             crate::client_name_and_version().to_owned(),
+            None,
         )
         .await
         {

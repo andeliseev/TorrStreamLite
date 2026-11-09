@@ -27,6 +27,10 @@ pub struct Config {
     /// Release an idle torrent after this many seconds (0 disables).
     #[arg(long, default_value_t = 300)]
     idle_seconds: u64,
+    /// Give up on a magnet link's details after this many seconds. Lampa stops asking 90 s
+    /// after its add; giving up first lets the window say why.
+    #[arg(long, default_value_t = 85, value_parser = clap::value_parser!(u64).range(1..=600))]
+    lookup_seconds: u64,
     /// Allow a browser client at this origin. May be repeated.
     #[arg(long)]
     allow_origin: Vec<String>,
@@ -106,6 +110,8 @@ async fn run(config: Config) -> Result<()> {
         active: Mutex::new(None),
         operation: Arc::new(Mutex::new(())),
         pending: Default::default(),
+        lookup: Default::default(),
+        add_error: Default::default(),
         started: std::time::Instant::now(),
         tv: Mutex::new(network::TvAccess::new(config.tv_port)),
         resume: Default::default(),

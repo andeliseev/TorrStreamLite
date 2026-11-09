@@ -10,7 +10,10 @@ use axum::{
     routing::{get, post},
 };
 use futures::StreamExt;
-use librqbit::{AddTorrent, AddTorrentOptions, ManagedTorrent, Session, TorrentStats};
+use librqbit::{
+    AddTorrent, AddTorrentOptions, ManagedTorrent, MetadataLookup, MetadataLookupCounts, Session,
+    TorrentStats,
+};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -40,6 +43,11 @@ pub struct AppState {
     pub operation: Arc<Mutex<()>>,
     /// The torrent Lampa added by magnet link while its details are on the way.
     pub pending: parking_lot::Mutex<Option<Pending>>,
+    /// How the lookup of a magnet link's details is going, while one runs.
+    pub lookup: parking_lot::Mutex<Option<Lookup>>,
+    /// Why the last torrent Lampa added didn't load, for the window: Lampa shows only its own
+    /// timeout. The next add clears it.
+    pub add_error: parking_lot::Mutex<Option<String>>,
     pub started: Instant,
     pub client: reqwest::Client,
     pub tv: Mutex<crate::network::TvAccess>,
@@ -73,6 +81,17 @@ pub struct Pending {
     data: String,
     timestamp: u64,
     cancel: CancellationToken,
+}
+pub struct Lookup {
+    counts: Arc<MetadataLookup>,
+    started: Instant,
+}
+/// Clears a lookup's progress when its add ends, also when the add is cancelled.
+struct ClearLookup<'a>(&'a parking_lot::Mutex<Option<Lookup>>);
+impl Drop for ClearLookup<'_> {
+    fn drop(&mut self) {
+        *self.0.lock() = None;
+    }
 }
 struct Preload {
     file: usize,
@@ -514,8 +533,53 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
         json!({"server":"TorrStream Lite", "version":env!("CARGO_PKG_VERSION"), "mode":"RAM only",
         "memory_bytes":crate::memory::memory_bytes(), "resident_bytes":crate::memory::resident_bytes(),
         "cache":state.factory.snapshot(), "cache_setting_mib":state.factory.budget() >> 20, "peer_limit":state.config.peers, "uptime_seconds":state.started.elapsed().as_secs(),
-        "torrent":active, "resolving":state.operation.try_lock().is_err()}),
+        "torrent":active, "resolving":state.operation.try_lock().is_err(),
+        "lookup":state.lookup.lock().as_ref().map(lookup_json), "add_error":state.add_error.lock().clone()}),
     )
+}
+/// How a magnet link's lookup is going, for the window.
+fn lookup_json(l: &Lookup) -> Value {
+    let c = l.counts.counts();
+    json!({"peers_found":c.found, "peers_asked":c.asked, "peers_failed":c.failed,
+        "seconds":l.started.elapsed().as_secs()})
+}
+/// Why a magnet link's details didn't come in time, from what its lookup saw.
+fn lookup_failed(c: MetadataLookupCounts, seconds: u64) -> String {
+    if c.found == 0 {
+        format!(
+            "Couldn't get the torrent's details: no peers were found in {seconds} seconds. Its \
+             trackers and the DHT returned none; it may have no seeders, or a VPN or your \
+             network may be blocking them."
+        )
+    } else if c.failed >= c.found && c.found == 1 {
+        format!(
+            "Couldn't get the torrent's details: the one peer found in {seconds} seconds didn't \
+             answer. It may be offline, or out of reach through a VPN."
+        )
+    } else if c.failed >= c.found {
+        format!(
+            "Couldn't get the torrent's details: none of the {} peers found in {seconds} seconds \
+             answered. They may be offline, or out of reach through a VPN.",
+            c.found
+        )
+    } else if c.failed == 0 && c.found == 1 {
+        format!(
+            "Couldn't get the torrent's details in {seconds} seconds: 1 peer found, but it \
+             hadn't sent them yet."
+        )
+    } else if c.failed == 0 {
+        format!(
+            "Couldn't get the torrent's details in {seconds} seconds: {} peers found, but none \
+             had sent them yet.",
+            c.found
+        )
+    } else {
+        format!(
+            "Couldn't get the torrent's details in {seconds} seconds: {} peers found, {} didn't \
+             answer, and the rest hadn't sent them yet.",
+            c.found, c.failed
+        )
+    }
 }
 async fn peer_details(State(state): State<Arc<AppState>>) -> Response {
     let active = state.active.lock().await.clone();
@@ -694,6 +758,7 @@ async fn add_from_lampa(state: &Arc<AppState>, req: AddRequest) -> ApiResult<Val
     let value = pending_json(&pending);
     *state.pending.lock() = Some(pending);
     let state = state.clone();
+    let title = req.title.clone();
     tokio::spawn(async move {
         let _op = op;
         tokio::select! {
@@ -701,7 +766,15 @@ async fn add_from_lampa(state: &Arc<AppState>, req: AddRequest) -> ApiResult<Val
                 Ok(active) => {
                     load(&state, active).await;
                 }
-                Err(ApiError(_, error)) => tracing::warn!(%error, "A torrent Lampa added didn't start"),
+                Err(ApiError(_, error)) => {
+                    tracing::warn!(%error, "A torrent Lampa added didn't start");
+                    // Lampa shows only its own timeout, so the window says why.
+                    *state.add_error.lock() = Some(if title.is_empty() {
+                        format!("The torrent Lampa added didn't load. {error}")
+                    } else {
+                        format!("“{title}” didn't load. {error}")
+                    });
+                }
             },
             // Stop, or Lampa's "drop": they wait for this task to let go of the lock.
             _ = cancel.cancelled() => remove_all(&state).await,
@@ -737,24 +810,44 @@ async fn start_torrent(
     link: Option<String>,
     req: AddRequest,
 ) -> ApiResult<Active> {
+    *state.add_error.lock() = None;
+    // A magnet link's details come from peers; the window shows how finding them goes.
+    let lookup = matches!(&input, AddTorrent::Url(url) if url.starts_with("magnet:"))
+        .then(|| Arc::new(MetadataLookup::default()));
+    *state.lookup.lock() = lookup.clone().map(|counts| Lookup {
+        counts,
+        started: Instant::now(),
+    });
+    let clear = ClearLookup(&state.lookup);
+    let seconds = state.config.lookup_seconds;
     let result = tokio::time::timeout(
-        Duration::from_secs(90),
+        Duration::from_secs(seconds),
         state.session.add_torrent(
             input,
             Some(AddTorrentOptions {
                 only_files: Some(Vec::new()),
                 overwrite: true,
+                metadata_lookup: lookup.clone(),
                 ..Default::default()
             }),
         ),
     )
     .await;
+    drop(clear);
     let handle = match result {
         Ok(Ok(response)) => response.into_handle().context("Torrent was not added")?,
         other => {
             remove_all(state).await;
-            return Err(match other { Ok(Err(e)) => anyhow::anyhow!(e).into(),
-                _ => ApiError(StatusCode::GATEWAY_TIMEOUT,"Magnet resolution timed out. Try a .torrent file or a torrent with reachable peers.".into()) });
+            return Err(match other {
+                Ok(Err(e)) => anyhow::anyhow!(e).into(),
+                _ => ApiError(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    match &lookup {
+                        Some(l) => lookup_failed(l.counts(), seconds),
+                        None => format!("The torrent didn't start in {seconds} seconds."),
+                    },
+                ),
+            });
         }
     };
     if let Err(e) = handle.wait_until_initialized().await {
@@ -1342,6 +1435,26 @@ mod tests {
     use super::*;
 
     const NONE: [String; 0] = [];
+
+    #[test]
+    fn a_failed_lookup_says_whether_peers_were_found_and_answered() {
+        let failed = |found, asked, failed| {
+            lookup_failed(
+                MetadataLookupCounts {
+                    found,
+                    asked,
+                    failed,
+                },
+                85,
+            )
+        };
+        assert!(failed(0, 0, 0).contains("no peers were found in 85 seconds"));
+        assert!(failed(1, 1, 1).contains("the one peer found in 85 seconds didn't answer"));
+        assert!(failed(12, 12, 12).contains("none of the 12 peers found in 85 seconds answered"));
+        assert!(failed(40, 34, 30).contains("40 peers found, 30 didn't answer"));
+        assert!(failed(1, 1, 0).contains("1 peer found, but it hadn't sent them yet"));
+        assert!(failed(3, 3, 0).contains("3 peers found, but none had sent them yet"));
+    }
 
     #[test]
     fn null_origin_only_on_home_network_listeners() {

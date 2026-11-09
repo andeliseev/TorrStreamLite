@@ -18,7 +18,7 @@ use crate::{
     bitv_factory::{BitVFactory, NonPersistentBitVFactory},
     create_torrent,
     create_torrent_file::CreateTorrentResult,
-    dht_utils::{ReadMetainfoResult, read_metainfo_from_peer_receiver},
+    dht_utils::{MetadataLookup, ReadMetainfoResult, read_metainfo_from_peer_receiver},
     ip_ranges::IpRanges,
     limits::{Limits, LimitsConfig},
     listen::{Accept, ListenerOptions},
@@ -298,6 +298,11 @@ pub struct AddTorrentOptions {
 
     // Custom trackers
     pub trackers: Option<Vec<String>>,
+
+    /// Counts the peers a magnet link's lookup finds, asks and loses, for a caller that wants
+    /// to say why the torrent's details didn't come.
+    #[serde(skip)]
+    pub metadata_lookup: Option<Arc<MetadataLookup>>,
 }
 
 pub struct ListOnlyResponse {
@@ -1269,7 +1274,13 @@ impl Session {
                         "no known way to resolve peers (no DHT, no trackers, no initial_peers)",
                     )?;
                     let resolved_magnet = self
-                        .resolve_magnet(info_hash, peer_rx, &trackers, opts.peer_opts)
+                        .resolve_magnet(
+                            info_hash,
+                            peer_rx,
+                            &trackers,
+                            opts.peer_opts,
+                            opts.metadata_lookup.clone(),
+                        )
                         .await?;
 
                     // Add back seen_peers into the peer stream, as we consumed some peers
@@ -1659,6 +1670,7 @@ impl Session {
         peer_rx: PeerStream,
         trackers: &[url::Url],
         peer_opts: Option<PeerConnectionOptions>,
+        lookup: Option<Arc<MetadataLookup>>,
     ) -> anyhow::Result<ResolveMagnetResult> {
         match read_metainfo_from_peer_receiver(
             self.peer_id,
@@ -1668,6 +1680,7 @@ impl Session {
             Some(self.merge_peer_opts(peer_opts)),
             self.connector.clone(),
             self.client_name_and_version.clone(),
+            lookup,
         )
         .await
         {

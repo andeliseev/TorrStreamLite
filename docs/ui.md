@@ -32,7 +32,7 @@ The status in the sidebar is a dot with a word:
 | Ready to play | green | A torrent is loaded |
 | Torrent error, Server unavailable | red | The engine reports an error, or the server doesn't answer |
 
-Errors show in one banner under the torrent's title; a dismissed engine error stays hidden until it changes. Confirmations ("Stream URL copied") show in a toast. While a torrent is loaded the add card is hidden, because only one torrent can run.
+Errors show in one banner under the torrent's title; a dismissed engine error stays hidden until it changes. While a magnet link's details are on the way, the line under the title counts the peers found and those that didn't answer; if a torrent Lampa added doesn't load, the banner says why, since Lampa shows only its own timeout. Confirmations ("Stream URL copied") show in a toast. While a torrent is loaded the add card is hidden, because only one torrent can run.
 
 A .torrent file dropped anywhere on the window is added, and so is a magnet link or torrent URL pasted outside a text field.
 
