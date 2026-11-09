@@ -31,7 +31,7 @@ flowchart LR
 | `cache.rs` | `RamFactory` and `RamStorage`: one anonymous memory mapping split into piece slots, reserved before network requests, least-recently-used eviction |
 | `network.rs` | TV access (in the app: **Home network → Allow other devices**): finds the Mac's private LAN addresses and runs one listener per address on the TV port, checked again every 3 s |
 | `range.rs` | Parses a single HTTP byte range |
-| `memory.rs` | The server's resident memory, shown in the app |
+| `memory.rs` | The server's memory for the app: the physical footprint on macOS, as Activity Monitor shows it, and the resident size |
 
 Options: `--listen` (default `127.0.0.1:8090`; the Mac app passes port 0), `--cache-mib` (96; Settings → Cache changes it for the next torrent, see `POST /api/cache`), `--peers` (20), `--idle-seconds` (300, 0 turns it off), `--tv-port` (8090, the port TorrServer apps expect), `--allow-origin` and `--allow-host` (both repeatable, see [Security](#security)) and `--no-dht`. The server prints `TORRSTREAM_LISTEN=http://…` once it listens; the Mac app reads that line.
 
@@ -40,12 +40,12 @@ The engine's local changes are listed in [vendor/UPSTREAM.md](../vendor/UPSTREAM
 ## Memory
 
 - One shared, anonymous RAM mapping, **96 MiB by default**; the Mac app offers 192 and 256 MiB too. No video files, disk cache, session database or DHT persistence.
-- Finding the piece to evict and the readers' window take time linear in the number of slots (sets, not list searches), which matters with small pieces: a 96 MiB cache of 16 KiB pieces has 6,144 slots, and both run under the engine's lock.
-- A reusable piece slot is reserved **before any network request**. At most four pieces download or verify at once. No payload allocation grows with torrent size.
+- The readers' window is one range of pieces per reader, not a list, and the next piece to download is found by skipping downloaded ones a word of bits at a time. Nothing builds a set for each new piece; eviction still looks at each cached piece once. This matters with small pieces: a 96 MiB cache of 16 KiB pieces has 6,144 slots, and it all runs under the engine's lock for every piece.
+- A reusable piece slot is reserved **before any network request**. Every connected peer can download a wanted piece at the same time; the readers' window bounds how many. No payload allocation grows with torrent size.
 - Only the windows that active HTTP readers request are downloaded. There's no background whole-file download.
 - Readers' windows and pieces being verified are protected from eviction. Eviction clears the engine's HAVE and per-file counters, so backward seeks download again correctly.
 - After a seek, obsolete requests are cancelled and late replies are discarded safely. Slots are reused after their writers finish. Reads and eviction coordinate through the same engine lock.
-- A piece readers want moves to the next peer that asks when its peer sent none of it for 5 s (it choked us or stopped), or has had it 10 times longer than the asking peer's average piece time (3 times when there's nothing new to download). The chunks already received stay. Peers often choke a client that doesn't upload, and without this one peer could hold back the piece a player is waiting for.
+- A piece readers want moves to the next peer that asks when its peer sent none of it for 5 s (it choked us or stopped), or has had it 10 times longer than the asking peer's average piece time (3 times for the piece a reader is at, or when there's nothing new to download). The chunks already received stay. Peers often choke a client that doesn't upload, and without this one peer could hold back the piece a player is waiting for.
 - At most 20 connected or connecting peers by default, 16 outstanding block requests per peer, four metadata connections and 256 discovered peer candidates. Peers stay connected while the torrent is loaded, also between a player's requests, so a seek doesn't wait for reconnections.
 - Up to four simultaneous HTTP requests for one playback session, fewer when pieces are large. Each response has one 64 KiB queued chunk and a bounded producer buffer.
 - A response waits for a slow torrent and ends only after five minutes with no data, so the player decides how long to wait: ending it early sends TV apps back to their menu.
@@ -61,7 +61,8 @@ Native API, used by the control page:
 
 | Request | Behavior |
 | --- | --- |
-| `GET /api/status` | Resident memory, cache accounting, the torrent and its files, engine stats |
+| `GET /api/status` | Memory (`memory_bytes`, the footprint on macOS, and `resident_bytes`), cache accounting and the torrent's progress, without its files |
+| `GET /api/files` | The torrent's files; the page reads them once per torrent |
 | `GET /api/peers` | Connected peers' counters, the torrent session ID and a monotonic sample time; no stored history |
 | `GET /api/network` | TV access: addresses, port, and whether the caller may change it |
 | `POST /api/network` | Loopback only: `{"enabled":true,"port":8090}`; the torrent keeps playing |

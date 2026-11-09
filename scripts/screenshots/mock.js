@@ -26,26 +26,17 @@
     ["Coastline.Stories.nfo", 2048],
   ];
   const hash = "5be01d9c3a7f44e2b6c8d0e1f2a3b4c5d6e7f809";
+  // What /api/status reports while it plays; the files come from /api/files.
   const torrent = {
     title: "Coastline Stories, Seasons 1–2",
-    name: "Coastline Stories",
     hash,
-    poster: "",
-    category: "",
-    data: "",
-    timestamp: 1794170000,
-    stat: 3,
-    stat_string: "Torrent working",
-    preload_size: 0,
-    preloaded_bytes: 0,
-    preload_error: null,
+    file_count: files.length,
     torrent_size: files.reduce((sum, f) => sum + f[1], 0),
-    loaded_size: BUDGET,
     download_speed: 2.31 * MiB,
     active_peers: 8,
-    total_peers: 17,
-    file_stats: files.map(([path, length], i) => ({ id: i + 1, path, length, stream_url: "/api/stream/" + (i + 1) })),
-    engine: { state: "live", error: null },
+    stat: 3,
+    error: null,
+    preload_error: null,
     active_readers: 1,
   };
   const replies = {
@@ -53,7 +44,8 @@
       server: "TorrStream Lite",
       version: "0.3.0",
       mode: "RAM only",
-      resident_bytes: Math.round(124.3 * MiB),
+      memory_bytes: Math.round(124.3 * MiB),
+      resident_bytes: Math.round(131.6 * MiB),
       cache: {
         budget_bytes: BUDGET,
         allocated_bytes: BUDGET,
@@ -69,6 +61,10 @@
       uptime_seconds: 1520,
       torrent,
       resolving: false,
+    }),
+    "/api/files": () => ({
+      hash,
+      files: files.map(([path, length], i) => ({ id: i + 1, path, length, stream_url: "/api/stream/" + (i + 1) })),
     }),
     "/api/network": () => ({
       enabled: true,

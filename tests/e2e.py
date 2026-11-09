@@ -62,7 +62,7 @@ def recv_exact(sock, n):
     return bytes(out)
 
 class Swarm:
-    def __init__(self, size_mib, corrupt=False, source=None, stalling_peer=False):
+    def __init__(self, size_mib, corrupt=False, source=None, stalling_peer=False, peers=1, peer_mbps=0):
         self.source = Path(source) if source else None
         self.prefix = 0 if source else PIECE + 123
         self.movie_size = self.source.stat().st_size if source else size_mib * 1024 * 1024
@@ -74,6 +74,7 @@ class Swarm:
         self.info_hash = hashlib.sha1(self.info).digest()
         self.corrupt = corrupt; self.corrupted = False; self.lock = threading.Lock()
         self.bytes_served = 0; self.stalled_requests = 0
+        rate = peer_mbps*1_000_000/8  # bytes per second per connection, 0 for no limit
         count=len(self.hashes)//20
         bits=bytearray([255]*((count+7)//8))
         if count%8: bits[-1]=(255 << (8-count%8))&255
@@ -88,7 +89,7 @@ class Swarm:
                     s.sendall(b'\x13BitTorrent protocol'+b'\0\0\0\0\0\x10\0\0'+swarm.info_hash+b'-PY0001-123456789012')
                     send(b'\x05'+bits); send(b'\x01')
                     send(b'\x14\x00'+bencode({b'm':{b'ut_metadata':1},b'metadata_size':len(swarm.info),b'reqq':16}))
-                    meta_id=1
+                    meta_id=1; ready=time.monotonic()
                     while True:
                         n=struct.unpack('!I',recv_exact(s,4))[0]
                         if n==0: continue
@@ -102,6 +103,11 @@ class Swarm:
                                 if swarm.corrupt and not swarm.corrupted:
                                     data=bytes([data[0]^255])+data[1:]; swarm.corrupted=True
                                 swarm.bytes_served+=length
+                            if rate:
+                                # A steady limit: time spent idle doesn't build up a burst.
+                                ready=max(ready,time.monotonic())
+                                time.sleep(ready-time.monotonic()) if ready>time.monotonic() else None
+                                ready+=length/rate
                             send(b'\x07'+struct.pack('!II',piece,off)+data)
                         elif msg[0]==20:
                             value, used=bdecode(msg[2:])
@@ -136,9 +142,9 @@ class Swarm:
                 finally: done.set()
         class Server(socketserver.ThreadingTCPServer):
             allow_reuse_address=True; daemon_threads=True
-        self.peer=Server(('127.0.0.1',0),Peer)
+        self.serving=[Server(('127.0.0.1',0),Peer) for _ in range(peers)]
         self.staller=Server(('127.0.0.1',0),Staller) if stalling_peer else None
-        peers=[s for s in [self.staller,self.peer] if s]
+        peers=([self.staller] if self.staller else [])+self.serving
         class Tracker(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args): pass
             def do_GET(self):
@@ -170,10 +176,12 @@ def main():
     parser.add_argument('--rate-mbps',type=float,default=0)
     parser.add_argument('--corrupt-first',action='store_true')
     parser.add_argument('--stalling-peer',action='store_true',help='add a peer that answers no requests')
+    parser.add_argument('--peers',type=int,default=1,help='peers that serve the data')
+    parser.add_argument('--peer-mbps',type=float,default=0,help='speed limit of each peer')
     parser.add_argument('--report',default='test-results/e2e.json')
     args=parser.parse_args()
     binary=str(Path(args.binary).resolve()); report=Path(args.report).resolve(); report.parent.mkdir(parents=True,exist_ok=True)
-    swarm=Swarm(args.size_mib,args.corrupt_first,stalling_peer=args.stalling_peer)
+    swarm=Swarm(args.size_mib,args.corrupt_first,stalling_peer=args.stalling_peer,peers=args.peers,peer_mbps=args.peer_mbps)
     with tempfile.TemporaryDirectory(prefix='torrstream-lite-e2e-') as tmp:
         log_path=report.with_suffix('.log')
         with log_path.open('w') as log:
@@ -204,6 +212,11 @@ def main():
             time.sleep(.2)
             assert js()['cache']['reserved_bytes']==0, 'Downloaded without a reader'
             mark('metadata and demand-only scheduling')
+            status=js()
+            assert status['torrent']['file_count']==2 and 'file_stats' not in status['torrent'] and status['memory_bytes']>0
+            listed=js('/api/files')
+            assert listed['hash']==t['hash'] and listed['files'][1]['length']==swarm.movie_size
+            mark('status leaves out the file list, which /api/files returns')
             with request('/api/stream/2',method='HEAD') as r: assert int(r.headers['Content-Length'])==swarm.movie_size
             assert js()['cache']['reserved_bytes']==0
             mark('HEAD does not download')
@@ -273,13 +286,18 @@ def main():
             assert not list(Path(tmp).iterdir()), 'Server wrote files in RAM-only mode'
             mark('no payload or session files written')
             if args.corrupt_first: assert swarm.corrupted; mark('corrupt piece rejected and recovered')
+            if args.peers>4 and args.peer_mbps:
+                # Before, at most four pieces downloaded at once, so four peers at most sent data.
+                four=4*args.peer_mbps
+                assert swarm.movie_size*8/elapsed/1e6>1.25*four, f'No faster than four peers: {swarm.movie_size*8/elapsed/1e6:.0f} Mbps'
+                mark(f'{args.peers} peers send at once')
             if args.stalling_peer:
                 assert swarm.stalled_requests, 'The stalling peer was never asked for a piece'
                 assert longest_wait[0]<15, f'A read waited {longest_wait[0]:.1f} s'
                 mark('pieces held by a peer that stopped sending go to another peer')
             assert samples and all(s['cache']['reserved_bytes']<=args.cache_mib*1048576 and s['cache']['allocated_bytes']<=args.cache_mib*1048576 for s in samples)
             mark('cache budget respected throughout')
-            out={'passed':results,'cache_mib':args.cache_mib,'movie_mib':args.size_mib,'rate_limit_mbps':args.rate_mbps,
+            out={'passed':results,'cache_mib':args.cache_mib,'movie_mib':args.size_mib,'rate_limit_mbps':args.rate_mbps,'peers':args.peers,'peer_mbps':args.peer_mbps,
                 'transfer_seconds':round(elapsed,3),'effective_mbps':round(swarm.movie_size*8/elapsed/1e6,2),
                 'idle_rss_mib':round(idle['resident_bytes']/1048576,2),'peak_rss_mib':round(max(s['resident_bytes'] or 0 for s in samples)/1048576,2),
                 'rss_after_stop_mib':round(stopped_rss/1048576,2),'longest_read_wait_seconds':round(longest_wait[0],3),

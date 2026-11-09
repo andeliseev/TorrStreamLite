@@ -370,12 +370,12 @@ impl TorrentStateLive {
         let Some(slots) = self.files.ram_cache_slots() else {
             return Ok(());
         };
-        let wanted = self.streams.ram_wanted_pieces(&self.lengths, slots);
+        let window = self.streams.ram_window(&self.lengths, slots);
         let mut cancelled = Vec::new();
         {
             let mut g = self.lock_write("prune_ram_requests");
             let pieces = g.get_pieces_mut()?;
-            for (id, peer) in pieces.stale_ram_pieces(&wanted) {
+            for (id, peer) in pieces.stale_ram_pieces(&window) {
                 // A writer that already owns this piece must finish before its slot is reused.
                 let Some(_guard) = self.per_piece_locks[id.get_usize()].try_write() else {
                     continue;
@@ -1499,14 +1499,11 @@ impl PeerHandler {
                 } = &mut **g;
                 let pieces = pieces.as_mut().ok_or(Error::ChunkTrackerEmpty)?;
                 if let Some(slots) = self.state.files.ram_cache_slots() {
-                    let wanted = self
-                        .state
-                        .streams
-                        .ram_wanted_pieces(&self.state.lengths, slots);
+                    let window = self.state.streams.ram_window(&self.state.lengths, slots);
                     let acquired = pieces.acquire_ram_piece(
                         self.addr,
                         self.counters.average_piece_download_time(),
-                        &wanted,
+                        &window,
                         &self.state.metadata.file_infos,
                         &*self.state.files,
                         |p| bf.get(p.get_usize()).map(|v| *v) == Some(true),

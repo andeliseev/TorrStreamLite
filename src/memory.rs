@@ -33,3 +33,38 @@ pub fn resident_bytes() -> Option<u64> {
     }
     None
 }
+
+/// The memory figure the app shows: on macOS the physical footprint, which Activity Monitor
+/// shows too (it also counts compressed pages, and not shared libraries); elsewhere the
+/// resident size.
+pub fn memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::proc_pid_rusage(
+                libc::getpid(),
+                libc::RUSAGE_INFO_V2,
+                &mut info as *mut _ as *mut libc::rusage_info_t,
+            )
+        };
+        if result == 0 {
+            return Some(info.ri_phys_footprint);
+        }
+    }
+    resident_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn memory_figures_cover_a_touched_allocation() {
+        // Other tests may free a 16 MiB cache meanwhile.
+        let before = super::memory_bytes().unwrap();
+        let block = vec![1u8; 64 << 20];
+        let after = super::memory_bytes().unwrap();
+        assert!(after >= before + (40 << 20), "{before} -> {after}");
+        assert!(super::resident_bytes().unwrap() >= 40 << 20);
+        drop(block);
+    }
+}

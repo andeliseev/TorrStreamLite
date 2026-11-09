@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     io::SeekFrom,
     sync::{
         Arc,
@@ -19,7 +19,9 @@ use tokio::{
 };
 use tracing::{debug, trace};
 
-use crate::{ManagedTorrent, file_info::FileInfo, storage::TorrentStorage};
+use crate::{
+    ManagedTorrent, file_info::FileInfo, piece_tracker::RamWindow, storage::TorrentStorage,
+};
 
 use super::{ManagedTorrentHandle, TorrentMetadata};
 
@@ -56,6 +58,21 @@ impl StreamState {
             end.div_ceil(dpl as u64).try_into().unwrap()
         };
         (start_id..end_id).filter_map(|i| lengths.validate_piece_index(i))
+    }
+
+    /// The pieces `queue` yields, as (first, end).
+    fn queue_range(&self, lengths: &Lengths, lookahead: u64) -> (u32, u32) {
+        let start = self.file_abs_offset + self.position;
+        let end = (start + lookahead).min(self.file_abs_offset + self.file_len);
+        let dpl = lengths.default_piece_length() as u64;
+        let pieces = lengths.total_pieces() as u64;
+        let start_id = (start / dpl).min(pieces);
+        let end_id = if self.position >= self.file_len {
+            start_id
+        } else {
+            end.div_ceil(dpl).min(pieces)
+        };
+        (start_id as u32, end_id as u32)
     }
 }
 
@@ -113,35 +130,17 @@ impl TorrentStreams {
         Interleave { all: all.into() }
     }
 
-    /// Interleave active readers, leaving one slot for transitions. No file-size scan.
-    pub(crate) fn ram_wanted_pieces(
-        &self,
-        lengths: &Lengths,
-        slots: usize,
-    ) -> Vec<ValidPieceIndex> {
+    /// Interleave active readers, leaving one slot for transitions. No file-size scan, and no
+    /// list: each reader's share of the window is a range of pieces.
+    pub(crate) fn ram_window(&self, lengths: &Lengths, slots: usize) -> RamWindow {
         let limit = slots.saturating_sub(1);
         let lookahead = limit as u64 * lengths.default_piece_length() as u64;
-        let mut queues: VecDeque<_> = self
+        let queues: Vec<(u32, u32)> = self
             .streams
             .iter()
-            .map(|s| s.queue(lengths, lookahead))
+            .map(|s| s.queue_range(lengths, lookahead))
             .collect();
-        let mut wanted = Vec::with_capacity(limit);
-        // Readers' windows can overlap. A set keeps this linear: with small pieces a cache has
-        // thousands of slots, and this runs under the torrent's write lock for every new piece.
-        let mut seen = HashSet::with_capacity(limit);
-        while wanted.len() < limit {
-            let Some(mut q) = queues.pop_front() else {
-                break;
-            };
-            if let Some(p) = q.next() {
-                if seen.insert(p) {
-                    wanted.push(p);
-                }
-                queues.push_back(q);
-            }
-        }
-        wanted
+        RamWindow::interleave(&queues, limit.try_into().unwrap_or(u32::MAX))
     }
 
     pub(crate) fn wake_streams_on_piece_completed(

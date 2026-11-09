@@ -10,7 +10,7 @@ use axum::{
     routing::{get, post},
 };
 use futures::StreamExt;
-use librqbit::{AddTorrent, AddTorrentOptions, ManagedTorrent, Session};
+use librqbit::{AddTorrent, AddTorrentOptions, ManagedTorrent, Session, TorrentStats};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -149,6 +149,7 @@ pub fn router(state: Arc<AppState>, lan: bool) -> Router {
             get(|| async { format!("TorrStreamLite.{}", env!("CARGO_PKG_VERSION")) }),
         )
         .route("/api/status", get(status))
+        .route("/api/files", get(files))
         .route("/api/peers", get(peer_details))
         .route(
             "/peer-rates.js",
@@ -334,10 +335,8 @@ fn cross_site(headers: &HeaderMap) -> bool {
         .is_some_and(|value| !matches!(value.as_bytes(), b"same-origin" | b"none"))
 }
 
-fn active_json(a: &Active) -> Value {
-    let stats = a.handle.stats();
-    let files = a
-        .handle
+fn files_json(a: &Active) -> Vec<Value> {
+    a.handle
         .with_metadata(|m| {
             m.file_infos
                 .iter()
@@ -350,35 +349,87 @@ fn active_json(a: &Active) -> Value {
                 })
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
-    let live = serde_json::to_value(&stats.live).unwrap_or_default();
-    let speed = live
-        .pointer("/download_speed/mbps")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0)
-        * 1024.0
-        * 1024.0;
+        .unwrap_or_default()
+}
+
+/// The state shared by the control page's status and the TorrServer-compatible torrent JSON.
+struct Progress {
+    stats: TorrentStats,
+    preload: Option<Arc<Preload>>,
+    preload_error: Option<String>,
+    /// TorrServer's `stat`: 2 while preloading, 3 working, 4 on an error.
+    stat: u8,
+    /// Bytes per second.
+    speed: f64,
+    torrent_size: u64,
+}
+fn progress(a: &Active) -> Progress {
+    let stats = a.handle.stats();
     let preload = a.preload.lock().clone();
     let warming = preload
         .as_ref()
         .is_some_and(|p| p.running.load(Ordering::Relaxed));
     let preload_error = preload.as_ref().and_then(|p| p.error.lock().clone());
-    let failed = stats.error.is_some() || preload_error.is_some();
+    let stat = if stats.error.is_some() || preload_error.is_some() {
+        4
+    } else if warming {
+        2
+    } else {
+        3
+    };
+    let speed = stats
+        .live
+        .as_ref()
+        .map_or(0.0, |live| live.download_speed.mbps * 1024.0 * 1024.0);
     let torrent_size = a
         .handle
         .with_metadata(|m| m.lengths().total_length())
         .unwrap_or(0);
-    let peers = stats.live.as_ref().map(|s| &s.snapshot.peer_stats);
+    Progress {
+        stats,
+        preload,
+        preload_error,
+        stat,
+        speed,
+        torrent_size,
+    }
+}
+fn active_readers(a: &Active) -> usize {
+    a.max_readers - a.readers.available_permits()
+}
+
+/// A torrent in TorrServer's shape, for Lampa and the reply to adding one.
+fn active_json(a: &Active) -> Value {
+    let p = progress(a);
+    let peers = p.stats.live.as_ref().map(|s| &s.snapshot.peer_stats);
     json!({"title":a.title, "name":a.handle.name(), "hash":a.handle.info_hash().as_string(), "poster":a.poster,
         "category":a.category, "data":a.data, "timestamp":a.timestamp,
-        "stat":if failed {4} else if warming {2} else {3}, "stat_string":if failed {"Torrent error"} else if warming {"Torrent preload"} else {"Torrent working"},
-        "preload_size":preload.as_ref().map_or(0, |p| p.target),
-        "preloaded_bytes":preload.as_ref().map_or(0, |p| p.loaded.load(Ordering::Relaxed)),
-        "preload_error":preload_error,
-        "torrent_size":torrent_size, "loaded_size":cached_bytes(a), "download_speed":speed,
+        "stat":p.stat, "stat_string":match p.stat {4 => "Torrent error", 2 => "Torrent preload", _ => "Torrent working"},
+        "preload_size":p.preload.as_ref().map_or(0, |p| p.target),
+        "preloaded_bytes":p.preload.as_ref().map_or(0, |p| p.loaded.load(Ordering::Relaxed)),
+        "preload_error":p.preload_error,
+        "torrent_size":p.torrent_size, "loaded_size":cached_bytes(a), "download_speed":p.speed,
         "active_peers":peers.map_or(0, |p| p.live),
         "total_peers":peers.map_or(0, |p| p.live + p.queued + p.connecting),
-        "file_stats":files, "engine":stats, "active_readers":a.max_readers-a.readers.available_permits()})
+        "file_stats":files_json(a), "active_readers":active_readers(a)})
+}
+
+/// What the control page needs every 1.5 s. The file list, up to 4,096 paths, comes once per
+/// torrent from `/api/files`.
+fn status_json(a: &Active) -> Value {
+    let p = progress(a);
+    json!({"title":a.title, "hash":a.handle.info_hash().as_string(),
+        "file_count":a.handle.with_metadata(|m| m.file_infos.len()).unwrap_or(0),
+        "torrent_size":p.torrent_size, "download_speed":p.speed,
+        "active_peers":p.stats.live.as_ref().map_or(0, |s| s.snapshot.peer_stats.live),
+        "stat":p.stat, "error":p.stats.error, "preload_error":p.preload_error,
+        "active_readers":active_readers(a)})
+}
+async fn files(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    let a = current(&state).await?;
+    Ok(Json(
+        json!({"hash":a.handle.info_hash().as_string(), "files":files_json(&a)}),
+    ))
 }
 fn cached_bytes(a: &Active) -> u64 {
     // Engine progress tracks selected download files; RAM mode selects none.
@@ -389,9 +440,10 @@ fn cached_bytes(a: &Active) -> u64 {
         .map_or(0, |hns| hns.have_bytes)
 }
 async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let active = state.active.lock().await.as_ref().map(active_json);
+    let active = state.active.lock().await.as_ref().map(status_json);
     Json(
-        json!({"server":"TorrStream Lite", "version":env!("CARGO_PKG_VERSION"), "mode":"RAM only", "resident_bytes":crate::memory::resident_bytes(),
+        json!({"server":"TorrStream Lite", "version":env!("CARGO_PKG_VERSION"), "mode":"RAM only",
+        "memory_bytes":crate::memory::memory_bytes(), "resident_bytes":crate::memory::resident_bytes(),
         "cache":state.factory.snapshot(), "cache_setting_mib":state.factory.budget() >> 20, "peer_limit":state.config.peers, "uptime_seconds":state.started.elapsed().as_secs(),
         "torrent":active, "resolving":state.operation.try_lock().is_err()}),
     )

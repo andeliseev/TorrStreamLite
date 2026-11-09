@@ -137,10 +137,11 @@ pub trait TorrentStorage: Send + Sync {
 
     /// Reserve before issuing requests. None means backpressure, not a storage error.
     /// Returned piece IDs were evicted and must be invalidated in the chunk tracker.
+    /// `protected` says which cached pieces must stay.
     fn reserve_ram_piece(
         &self,
         _id: ValidPieceIndex,
-        _protected: &[ValidPieceIndex],
+        _protected: &dyn Fn(u32) -> bool,
     ) -> Option<Vec<u32>> {
         Some(Vec::new())
     }
@@ -206,7 +207,7 @@ impl<U: TorrentStorage + ?Sized> TorrentStorage for Box<U> {
     fn reserve_ram_piece(
         &self,
         id: ValidPieceIndex,
-        protected: &[ValidPieceIndex],
+        protected: &dyn Fn(u32) -> bool,
     ) -> Option<Vec<u32>> {
         (**self).reserve_ram_piece(id, protected)
     }

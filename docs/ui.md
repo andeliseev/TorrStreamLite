@@ -19,7 +19,7 @@ In the Mac app (`.desktop` on `<html>`) the page runs under a transparent titleb
 
 ## State and feedback
 
-While the page is visible it reads `/api/status` every 1.5 s and `/api/network` every 3 s. Each poll is skipped while the previous one is still running, and nothing is polled while the page is hidden. The file list is rebuilt only when the torrent's hash changes. Server text (file names, errors, peer clients) is always set with `textContent`.
+While the page is visible it reads `/api/status` every 1.5 s and `/api/network` every 3 s. Each poll is skipped while the previous one is still running, and nothing is polled while the page is hidden. The status leaves out the file list: the page reads it from `/api/files` and rebuilds it only when the torrent's hash changes. Server text (file names, errors, peer clients) is always set with `textContent`.
 
 The status in the sidebar is a dot with a word:
 

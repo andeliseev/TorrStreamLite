@@ -58,6 +58,8 @@ jobs:
       - run: python3 tests/e2e.py --binary target/debug/torrstream-lite --size-mib 32 --corrupt-first
       # Adds a peer that stops answering, like one that chokes the engine mid-piece.
       - run: python3 tests/e2e.py --binary target/debug/torrstream-lite --size-mib 32 --stalling-peer --report test-results/stalling-peer.json
+      # Twelve speed-limited peers, which must all send at once.
+      - run: python3 tests/e2e.py --binary target/debug/torrstream-lite --cache-mib 16 --size-mib 48 --peers 12 --peer-mbps 10 --report test-results/many-peers.json
       - run: python3 tests/lampa.py --binary target/debug/torrstream-lite
       # Uses the runner's private network address, like a TV on a home network.
       - run: python3 tests/network.py --binary target/debug/torrstream-lite

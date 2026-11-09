@@ -1,11 +1,11 @@
-// Proposed control page. Same server API and native messages as ui/app.js;
-// only the layout, states and feedback differ.
+// The control page (see docs/ui.md).
 const $ = (id) => document.getElementById(id);
 const desktopApp = Boolean(window.torrstreamDesktop);
 document.documentElement.classList.toggle("desktop", desktopApp);
 
 let current = null,
   lastHash,
+  filesRun = 0,
   loading = false,
   resolving = false,
   statusBusy = false,
@@ -410,7 +410,7 @@ function showTorrent(torrent) {
   $("files-view").hidden = !torrent;
   $("stop").hidden = !torrent;
   if (torrent) {
-    const count = torrent.file_stats.length;
+    const count = torrent.file_count;
     $("torrent-name").textContent = torrent.title;
     $("torrent-name").title = torrent.title;
     $("torrent-meta").textContent =
@@ -424,17 +424,32 @@ function showTorrent(torrent) {
   const hash = torrent?.hash || null;
   if (hash !== lastHash) {
     lastHash = hash;
-    renderFiles(torrent);
+    loadFiles(torrent);
   }
   markPlaying();
 }
-function renderFiles(torrent) {
+// The status poll leaves out the file list (up to 4,096 paths); it's read once per torrent.
+async function loadFiles(torrent) {
+  const run = ++filesRun;
+  renderFiles(torrent, []);
+  if (!torrent) return;
+  try {
+    const answer = await api("/api/files");
+    if (run !== filesRun || answer.hash !== torrent.hash) return;
+    renderFiles(torrent, answer.files);
+    markPlaying();
+  } catch (e) {
+    // Read it again with the next status.
+    if (run === filesRun) lastHash = undefined;
+  }
+}
+function renderFiles(torrent, files) {
   const list = $("files");
   list.replaceChildren();
   list.scrollTop = 0;
   if (!torrent) return;
   const rows = document.createDocumentFragment();
-  for (const file of torrent.file_stats) {
+  for (const file of files) {
     const kind = kindOf(file.path);
     const row = document.createElement("li");
     row.className = "file " + kind;
@@ -520,7 +535,7 @@ async function refresh() {
       Math.min(100, (100 * s.cache.reserved_bytes) / s.cache.budget_bytes) +
       "%";
     $("rss").innerHTML =
-      (s.resident_bytes ? mib(s.resident_bytes) : "—") + " <small>MiB</small>";
+      (s.memory_bytes ? mib(s.memory_bytes) : "—") + " <small>MiB</small>";
     $("cache-pieces").textContent = s.cache.cached_pieces;
     $("cache-evictions").textContent = s.cache.evictions;
     $("cache-piece-size").textContent = s.cache.piece_bytes
@@ -529,7 +544,7 @@ async function refresh() {
     $("app-version").textContent = s.version;
     showCacheSetting(s.cache_setting_mib);
     showTorrent(t);
-    const error = t?.engine?.error || t?.preload_error || "";
+    const error = t?.error || t?.preload_error || "";
     if (loading || resolving) setState("busy", "Adding torrent…");
     else if (!t) setState("idle", "Idle");
     else if (error) setState("error", "Torrent error");

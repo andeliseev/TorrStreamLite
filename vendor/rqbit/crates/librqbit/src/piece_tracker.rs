@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bitvec::{order::Msb0, slice::BitSlice};
 use buffers::ByteBuf;
 use librqbit_core::lengths::ValidPieceIndex;
 use peer_binary_protocol::Piece;
@@ -50,6 +51,114 @@ pub(crate) enum RamAcquired {
         piece: ValidPieceIndex,
         from_peer: PeerHandle,
     },
+}
+
+/// The pieces active readers want, as one range per reader rather than a list: with small
+/// pieces a cache has thousands of slots, and the window is consulted for every new piece.
+///
+/// Readers take turns, each one's first piece, then each one's second, and so on, until
+/// `limit` distinct pieces. That leaves each reader a prefix of its read-ahead.
+#[derive(Debug, Default)]
+pub(crate) struct RamWindow {
+    /// (first piece, number of pieces) per reader, in turn order.
+    readers: Vec<(u32, u32)>,
+}
+
+impl RamWindow {
+    /// `queues` holds each reader's read-ahead as (first piece, end), in turn order.
+    pub(crate) fn interleave(queues: &[(u32, u32)], limit: u32) -> Self {
+        if let [(start, end)] = *queues {
+            return Self {
+                readers: vec![(start, end.saturating_sub(start).min(limit))],
+            };
+        }
+        let mut readers: Vec<(u32, u32)> = queues.iter().map(|&(start, _)| (start, 0)).collect();
+        let mut distinct = 0;
+        loop {
+            let mut took = false;
+            for (i, &(start, end)) in queues.iter().enumerate() {
+                let next = start + readers[i].1;
+                if next >= end {
+                    continue;
+                }
+                if distinct == limit {
+                    return Self { readers };
+                }
+                // A piece another reader already took counts once.
+                let taken = readers
+                    .iter()
+                    .enumerate()
+                    .any(|(j, &(s, len))| j != i && next.wrapping_sub(s) < len);
+                if !taken {
+                    distinct += 1;
+                }
+                readers[i].1 += 1;
+                took = true;
+            }
+            if !took {
+                return Self { readers };
+            }
+        }
+    }
+
+    pub(crate) fn contains(&self, piece: u32) -> bool {
+        self.readers
+            .iter()
+            .any(|&(start, len)| piece.wrapping_sub(start) < len)
+    }
+
+    /// How soon a reader needs the piece: 0 for one a reader is at, 1 for the next, and so on.
+    pub(crate) fn rank(&self, piece: u32) -> Option<u32> {
+        self.readers
+            .iter()
+            .filter_map(|&(start, len)| {
+                let depth = piece.wrapping_sub(start);
+                (depth < len).then_some(depth)
+            })
+            .min()
+    }
+
+    /// The first wanted piece, in turn order, that's missing from `have` and passes `accept`.
+    /// Pieces already downloaded are skipped a word of bits at a time.
+    pub(crate) fn first(
+        &self,
+        have: &BitSlice<u8, Msb0>,
+        accept: impl Fn(u32) -> bool,
+    ) -> Option<u32> {
+        self.readers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &(start, len))| {
+                let missing = have.get(start as usize..(start + len) as usize)?;
+                let piece = missing
+                    .iter_zeros()
+                    .map(|depth| start + depth as u32)
+                    .find(|&p| accept(p))?;
+                Some(((piece - start, i), piece))
+            })
+            .min_by_key(|&(turn, _)| turn)
+            .map(|(_, piece)| piece)
+    }
+
+    /// The wanted pieces in turn order, each once. The scheduler only needs `first`.
+    #[cfg(test)]
+    pub(crate) fn pieces(&self) -> impl Iterator<Item = u32> + '_ {
+        let rounds = self.readers.iter().map(|r| r.1).max().unwrap_or(0);
+        (0..rounds).flat_map(move |round| {
+            self.readers
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, &(start, len))| {
+                    let piece = start + round;
+                    // Another reader reached it in an earlier turn.
+                    let earlier = self.readers.iter().enumerate().any(|(j, &(s, l))| {
+                        let depth = piece.wrapping_sub(s);
+                        j != i && depth < l && (depth < round || (depth == round && j < i))
+                    });
+                    (round < len && !earlier).then_some(piece)
+                })
+        })
+    }
 }
 
 /// Result of attempting to acquire a piece.
@@ -273,11 +382,11 @@ impl PieceTracker {
 
     pub(crate) fn stale_ram_pieces(
         &self,
-        wanted: &[ValidPieceIndex],
+        window: &RamWindow,
     ) -> Vec<(ValidPieceIndex, PeerHandle)> {
         self.inflight
             .iter()
-            .filter(|(p, _)| !wanted.contains(p))
+            .filter(|(p, _)| !window.contains(p.get()))
             .map(|(&p, owner)| (p, owner.peer))
             .collect()
     }
@@ -291,43 +400,50 @@ impl PieceTracker {
     /// allocation until storage has granted a reservation. The caller holds the live lock.
     ///
     /// Before reserving a new piece, the peer takes over a wanted piece that's stuck with
-    /// another peer; with nothing left to reserve, also one that's merely slow there. As in
-    /// `acquire_piece`, but by urgency: a peer that chokes us mid-piece would otherwise keep
-    /// the piece a reader is waiting for until it disconnects.
+    /// another peer: one a reader is at, from a peer 3 times slower; any other, from one 10
+    /// times slower. With nothing left to reserve, any wanted piece from a peer 3 times
+    /// slower. As in `acquire_piece`, but by urgency: a peer that chokes us mid-piece would
+    /// otherwise keep the piece a reader is waiting for until it disconnects.
+    ///
+    /// Every peer can work on wanted pieces at once; the readers' window bounds them.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire_ram_piece(
         &mut self,
         peer: PeerHandle,
         peer_avg_time: Option<Duration>,
-        wanted: &[ValidPieceIndex],
+        window: &RamWindow,
         files: &FileInfos,
         storage: &dyn crate::storage::TorrentStorage,
         peer_has: impl Fn(ValidPieceIndex) -> bool,
         can_steal: impl Fn(ValidPieceIndex) -> bool,
     ) -> Option<RamAcquired> {
         if let Some(stolen) =
-            self.steal_ram_piece(peer, peer_avg_time, wanted, 10.0, &peer_has, &can_steal)
+            self.steal_ram_piece(peer, peer_avg_time, window, 10.0, &peer_has, &can_steal)
         {
             return Some(stolen);
         }
-        if self.inflight.len() + self.verifying.len() < 4 {
-            let mut protected = wanted.to_vec();
-            protected.extend(self.inflight.keys().copied());
-            protected.extend(self.verifying.iter().copied());
-            for &id in wanted {
-                if self.chunks.is_piece_have(id)
-                    || self.inflight.contains_key(&id)
-                    || self.verifying.contains(&id)
-                    || !peer_has(id)
-                {
-                    continue;
-                }
-                let Some(evicted) = storage.reserve_ram_piece(id, &protected) else {
-                    continue;
+        let lengths = *self.chunks.get_lengths();
+        let next = window.first(self.chunks.get_have_pieces().as_slice(), |p| {
+            lengths.validate_piece_index(p).is_some_and(|p| {
+                peer_has(p) && !self.inflight.contains_key(&p) && !self.verifying.contains(&p)
+            })
+        });
+        if let Some(id) = next.and_then(|p| lengths.validate_piece_index(p)) {
+            let evicted = {
+                let (inflight, verifying) = (&self.inflight, &self.verifying);
+                let protected = |p: u32| {
+                    window.contains(p)
+                        || lengths
+                            .validate_piece_index(p)
+                            .is_some_and(|p| inflight.contains_key(&p) || verifying.contains(&p))
                 };
+                storage.reserve_ram_piece(id, &protected)
+            };
+            // None: no slot is free or evictable, for this piece or any other.
+            if let Some(evicted) = evicted {
                 let mut evicted_bytes = 0;
                 for old in evicted {
-                    if let Some(old) = self.chunks.get_lengths().validate_piece_index(old) {
+                    if let Some(old) = lengths.validate_piece_index(old) {
                         evicted_bytes += self.chunks.forget_ram_piece(old, files);
                     }
                 }
@@ -338,30 +454,38 @@ impl PieceTracker {
                 });
             }
         }
-        self.steal_ram_piece(peer, peer_avg_time, wanted, 3.0, &peer_has, &can_steal)
+        self.steal_ram_piece(peer, peer_avg_time, window, 3.0, &peer_has, &can_steal)
     }
 
     /// Takes over the most urgent wanted piece that another peer has sent nothing of for
-    /// `RAM_STALL`, or has had for `slower` times this peer's average piece time. The
-    /// chunks already received stay; only the missing ones are requested again.
+    /// `RAM_STALL`, or has had for `slower` times this peer's average piece time (3 times for
+    /// a piece a reader is at). The chunks already received stay; only the missing ones are
+    /// requested again.
     fn steal_ram_piece(
         &mut self,
         peer: PeerHandle,
         peer_avg_time: Option<Duration>,
-        wanted: &[ValidPieceIndex],
+        window: &RamWindow,
         slower: f64,
         peer_has: &impl Fn(ValidPieceIndex) -> bool,
         can_steal: &impl Fn(ValidPieceIndex) -> bool,
     ) -> Option<RamAcquired> {
-        let slow_after = peer_avg_time.map(|avg| avg.mul_f64(slower));
-        let piece = wanted.iter().copied().find(|&p| {
-            self.inflight.get(&p).is_some_and(|info| {
-                info.peer != peer
-                    && (info.last_progress.elapsed() >= RAM_STALL
-                        || slow_after.is_some_and(|after| info.started.elapsed() >= after))
-            }) && peer_has(p)
-                && can_steal(p)
-        })?;
+        let after = |times: f64| peer_avg_time.map(|avg| avg.mul_f64(times));
+        let (slow_after, urgent_after) = (after(slower), after(slower.min(3.0)));
+        // Few pieces are in flight; the window only ranks the ones that qualify.
+        let (_, piece) = self
+            .inflight
+            .iter()
+            .filter(|(_, info)| info.peer != peer)
+            .filter_map(|(&p, info)| {
+                let rank = window.rank(p.get())?;
+                let limit = if rank == 0 { urgent_after } else { slow_after };
+                let stuck = info.last_progress.elapsed() >= RAM_STALL
+                    || limit.is_some_and(|limit| info.started.elapsed() >= limit);
+                stuck.then_some((rank, p))
+            })
+            .filter(|&(_, p)| peer_has(p) && can_steal(p))
+            .min_by_key(|&(rank, p)| (rank, p.get()))?;
         let info = self.inflight.get_mut(&piece)?;
         let from_peer = std::mem::replace(&mut info.peer, peer);
         info.started = Instant::now();
@@ -945,6 +1069,11 @@ mod tests {
             .unwrap()
     }
 
+    /// One reader at piece 0 with read-ahead to piece 5.
+    fn window() -> RamWindow {
+        RamWindow::interleave(&[(0, 5)], 10)
+    }
+
     #[test]
     fn ram_piece_stuck_with_a_quiet_peer_goes_to_the_next_peer() {
         let mut tracker = PieceTracker::new(make_test_chunk_tracker(5));
@@ -956,17 +1085,17 @@ mod tests {
             tracker.inflight.get_mut(&p).unwrap().last_progress -= RAM_STALL;
         }
 
-        // Peer 2 has no history yet, and takes the most urgent piece first.
-        let got = tracker.steal_ram_piece(peer(2), None, &[p1, p0], 10.0, &|_| true, &|_| true);
+        // Peer 2 has no history yet, and takes the piece the reader is at first.
+        let got = tracker.steal_ram_piece(peer(2), None, &window(), 10.0, &|_| true, &|_| true);
         assert_eq!(
             got,
             Some(RamAcquired::Stolen {
-                piece: p1,
+                piece: p0,
                 from_peer: peer(1)
             })
         );
-        assert_eq!(tracker.get_inflight(p1).unwrap().peer, peer(2));
-        assert_eq!(tracker.get_inflight(p0).unwrap().peer, peer(1));
+        assert_eq!(tracker.get_inflight(p0).unwrap().peer, peer(2));
+        assert_eq!(tracker.get_inflight(p1).unwrap().peer, peer(1));
     }
 
     #[test]
@@ -977,7 +1106,7 @@ mod tests {
         tracker.inflight.get_mut(&p0).unwrap().last_progress -= RAM_STALL;
         tracker.mark_chunk_downloaded(&Piece::from_data(0, 0, &[0; 16384]));
 
-        let got = tracker.steal_ram_piece(peer(2), None, &[p0], 10.0, &|_| true, &|_| true);
+        let got = tracker.steal_ram_piece(peer(2), None, &window(), 10.0, &|_| true, &|_| true);
         assert_eq!(got, None);
         assert_eq!(tracker.get_inflight(p0).unwrap().peer, peer(1));
     }
@@ -990,7 +1119,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         let fast = Some(Duration::from_millis(1));
         let take = |tracker: &mut PieceTracker, who, avg, has: bool, unlocked: bool| {
-            tracker.steal_ram_piece(who, avg, &[p0], 10.0, &|_| has, &|_| unlocked)
+            tracker.steal_ram_piece(who, avg, &window(), 10.0, &|_| has, &|_| unlocked)
         };
 
         assert_eq!(
@@ -1023,5 +1152,106 @@ mod tests {
         );
         let taken = tracker.get_inflight(p0).unwrap();
         assert!(taken.started.elapsed() < Duration::from_millis(20));
+    }
+
+    #[test]
+    fn the_piece_a_reader_is_at_moves_sooner() {
+        let mut tracker = PieceTracker::new(make_test_chunk_tracker(5));
+        let (p0, p2) = (index(&tracker, 0), index(&tracker, 2));
+        tracker.reserve_piece(p0, peer(1));
+        tracker.reserve_piece(p2, peer(1));
+        std::thread::sleep(Duration::from_millis(100));
+        // Peer 2 takes 20 ms a piece: after 60 ms for the reader's piece, 200 ms for the rest.
+        let avg = Some(Duration::from_millis(20));
+        let take = |tracker: &mut PieceTracker, slower| {
+            tracker.steal_ram_piece(peer(2), avg, &window(), slower, &|_| true, &|_| true)
+        };
+
+        let urgent = Some(RamAcquired::Stolen {
+            piece: p0,
+            from_peer: peer(1),
+        });
+        assert_eq!(take(&mut tracker, 10.0), urgent);
+        assert_eq!(take(&mut tracker, 10.0), None, "piece 2 has 100 more ms");
+        // With nothing new to download, 3 times slower is enough for any wanted piece.
+        let rest = Some(RamAcquired::Stolen {
+            piece: p2,
+            from_peer: peer(1),
+        });
+        assert_eq!(take(&mut tracker, 3.0), rest);
+    }
+
+    #[test]
+    fn pieces_outside_the_window_are_stale() {
+        let mut tracker = PieceTracker::new(make_test_chunk_tracker(5));
+        let (p1, p4) = (index(&tracker, 1), index(&tracker, 4));
+        tracker.reserve_piece(p1, peer(1));
+        tracker.reserve_piece(p4, peer(2));
+        let window = RamWindow::interleave(&[(0, 5)], 3);
+        assert_eq!(tracker.stale_ram_pieces(&window), vec![(p4, peer(2))]);
+    }
+
+    use bitvec::vec::BitVec;
+
+    /// The window as a list, the way it was built before it became ranges.
+    fn listed(queues: &[(u32, u32)], limit: u32) -> Vec<u32> {
+        let mut queues: std::collections::VecDeque<_> = queues.iter().map(|&(s, e)| s..e).collect();
+        let mut seen = HashSet::new();
+        let mut wanted = Vec::new();
+        while wanted.len() < limit as usize {
+            let Some(mut queue) = queues.pop_front() else {
+                break;
+            };
+            if let Some(p) = queue.next() {
+                if seen.insert(p) {
+                    wanted.push(p);
+                }
+                queues.push_back(queue);
+            }
+        }
+        wanted
+    }
+
+    #[test]
+    fn ram_window_matches_listing_the_readers_pieces() {
+        let mut seed = 7u64;
+        let mut next = |n: u32| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) % n as u64) as u32
+        };
+        for _ in 0..5000 {
+            let readers = 1 + next(4);
+            let queues: Vec<(u32, u32)> = (0..readers)
+                .map(|_| {
+                    let start = next(40);
+                    (start, start + next(30))
+                })
+                .collect();
+            let limit = next(60);
+            let window = RamWindow::interleave(&queues, limit);
+            let expected = listed(&queues, limit);
+            let pieces: Vec<u32> = window.pieces().collect();
+            assert_eq!(pieces, expected, "{queues:?}, limit {limit}");
+            for p in 0..80 {
+                assert_eq!(window.contains(p), expected.contains(&p), "piece {p}");
+            }
+            if let Some(&first) = expected.first() {
+                assert_eq!(window.rank(first), Some(0));
+            }
+            let have: BitVec<u8, Msb0> = (0..80).map(|_| next(3) > 0).collect();
+            let rejected = next(80);
+            let accept = |p: u32| p != rejected;
+            let first = expected
+                .iter()
+                .copied()
+                .find(|&p| !have[p as usize] && accept(p));
+            assert_eq!(
+                window.first(&have, accept),
+                first,
+                "{queues:?}, limit {limit}"
+            );
+        }
     }
 }

@@ -8,12 +8,12 @@ License: Apache-2.0, retained at `rqbit/LICENSE`. Source authorship and package 
 
 Local changes supporting bounded RAM streaming:
 
-- `storage/mod.rs`: opt-in cache-slot, pre-request reservation, and release hooks, including forwarding through boxed storage.
+- `storage/mod.rs`: opt-in cache-slot, pre-request reservation (with a check for protected pieces, not a list), and release hooks, including forwarding through boxed storage.
 - `torrent_state/initializing.rs`: ephemeral storage starts with an empty bitfield without scanning nonexistent files.
-- `piece_tracker.rs`: bounded demand-only acquisition, explicit verifying state, safe reservation/cancellation, no whole-file queue in RAM mode; a wanted piece moves to another peer when its peer sent none of it for 5 s or is much slower, like upstream's steals but by readers' urgency.
+- `piece_tracker.rs`: demand-only acquisition with no cap on pieces in flight (the readers' window bounds them), explicit verifying state, safe reservation/cancellation, no whole-file queue in RAM mode; the readers' window as one range per reader, with the next missing piece found in the HAVE bits; a wanted piece moves to another peer when its peer sent none of it for 5 s or is much slower (3x for the piece a reader is at), like upstream's steals but by readers' urgency.
 - `chunk_tracker.rs`: eviction clears HAVE/chunk state and subtracts per-file and total cached-byte counters; a per-chunk received check.
 - `torrent_state/live/mod.rs`: integrate reservations before peer requests, announce RAM pieces taken over from another peer like steals and request only their missing chunks, cancel obsolete pieces, protect concurrent writers and hash checks, cap discovered candidates, wake downloaders after reader changes, and never treat RAM storage as finished, so idle peers stay connected between readers instead of being disconnected and backed off for 10 s or more.
-- `torrent_state/streaming.rs`: cache-sized interleaved reader windows, removing overlaps with a set so large caches stay linear, EOF handling, wakeups, and atomic HAVE/read access relative to eviction.
+- `torrent_state/streaming.rs`: cache-sized interleaved reader windows as ranges, EOF handling, wakeups, and atomic HAVE/read access relative to eviction.
 - `dht_utils.rs`: metadata connection concurrency 4 and candidate limit 256.
 - `peer_info_reader/mod.rs`: metadata size limit 2 MiB and zero-size rejection.
 

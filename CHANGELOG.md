@@ -6,6 +6,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 - **Settings → Cache:** choose 96, 192 or 256 MiB. More cache keeps more of the video around where you're watching, for smoother playback on slow torrents and quicker seeks back. A change applies to the next torrent you add.
 - Torrents made of many small pieces stream smoothly instead of slowing down and keeping a processor core busy.
+- Downloads from all connected peers at once. Before, at most four peers sent data at a time, which could hold back torrents with many slow peers.
+- **Memory** in the sidebar shows the same figure as Activity Monitor.
 - Fixed playback that could stop and send Lampa back to the file list when a peer stopped sending its part of the video. Another peer now takes that part over within seconds, and a torrent that's just slow gets five minutes instead of 45 seconds before the stream gives up.
 - The window no longer leaves a web cache on disk, and the one earlier versions left is deleted.
 

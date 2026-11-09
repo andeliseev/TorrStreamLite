@@ -8,7 +8,7 @@ use librqbit_core::lengths::ValidPieceIndex;
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::Path,
     sync::{
         Arc, Weak,
@@ -183,7 +183,7 @@ impl RamCache {
         })
     }
 
-    fn reserve(&self, piece: u32, protected: &HashSet<u32>) -> Option<Vec<u32>> {
+    fn reserve(&self, piece: u32, protected: &dyn Fn(u32) -> bool) -> Option<Vec<u32>> {
         let mut g = self.inner.lock();
         if g.pieces.contains_key(&piece) {
             return Some(Vec::new());
@@ -195,7 +195,7 @@ impl RamCache {
             let oldest = g
                 .pieces
                 .iter()
-                .filter(|(id, _)| !protected.contains(id))
+                .filter(|(id, _)| !protected(**id))
                 .min_by_key(|(_, slot)| slot.touched)
                 .map(|(&id, _)| id);
             let Some(oldest) = oldest else {
@@ -317,12 +317,9 @@ impl TorrentStorage for RamStorage {
     fn reserve_ram_piece(
         &self,
         id: ValidPieceIndex,
-        protected: &[ValidPieceIndex],
+        protected: &dyn Fn(u32) -> bool,
     ) -> Option<Vec<u32>> {
-        // A set, so checking each cached piece against it stays linear: with small pieces the
-        // cache has thousands of slots, and this runs under the engine's lock for every piece.
-        let protected: HashSet<u32> = protected.iter().map(|p| p.get()).collect();
-        self.cache.reserve(id.get(), &protected)
+        self.cache.reserve(id.get(), protected)
     }
     fn release_ram_piece(&self, id: ValidPieceIndex) {
         self.cache.release(id.get());
@@ -340,25 +337,25 @@ mod tests {
         let c = cache();
         assert!(c.write(0, &[1]).is_err());
         for p in 0..3 {
-            assert!(c.reserve(p, &HashSet::new()).is_some());
+            assert!(c.reserve(p, &|_| false).is_some());
         }
-        assert!(c.reserve(3, &HashSet::from([0, 1, 2])).is_none());
+        assert!(c.reserve(3, &|p| p <= 2).is_none());
         assert_eq!(c.stats().allocated_bytes, 12288);
         assert_eq!(c.stats().peak_reserved_bytes, 12288);
-        assert_eq!(c.reserve(3, &HashSet::from([0, 2])), Some(vec![1]));
+        assert_eq!(c.reserve(3, &|p| p == 0 || p == 2), Some(vec![1]));
         assert!(c.read(4096, &mut [0]).is_err());
     }
     #[test]
     fn reuse_zeroes_old_data_and_cross_piece_io_works() {
         let c = cache();
-        c.reserve(0, &HashSet::new());
-        c.reserve(1, &HashSet::new());
+        c.reserve(0, &|_| false);
+        c.reserve(1, &|_| false);
         c.write(4090, &[7; 16]).unwrap();
         let mut buf = [0; 16];
         c.read(4090, &mut buf).unwrap();
         assert_eq!(buf, [7; 16]);
         c.release(0);
-        c.reserve(4, &HashSet::new());
+        c.reserve(4, &|_| false);
         c.read(4 * 4096 + 4090, &mut [0; 6]).unwrap();
         let mut zero = [1; 6];
         c.read(4 * 4096 + 4090, &mut zero).unwrap();
@@ -372,7 +369,7 @@ mod tests {
                 let c = c.clone();
                 std::thread::spawn(move || {
                     for n in 0..100 {
-                        c.reserve(i * 100 + n, &HashSet::new());
+                        c.reserve(i * 100 + n, &|_| false);
                     }
                 })
             })
@@ -389,13 +386,15 @@ mod tests {
         // check every slot against every protected piece: about 16 million steps.
         let c = RamCache::new(4096 * 4096, 4096, Default::default()).unwrap();
         for p in 0..4096 {
-            assert_eq!(c.reserve(p, &HashSet::new()), Some(vec![]));
+            assert_eq!(c.reserve(p, &|_| false), Some(vec![]));
         }
         let started = std::time::Instant::now();
         for p in 4096..4608 {
             // Everything from the newest 4000 pieces down is protected, like a reader's window.
-            let protected: HashSet<u32> = (p - 4000..p).collect();
-            assert_eq!(c.reserve(p, &protected), Some(vec![p - 4096]));
+            assert_eq!(
+                c.reserve(p, &|q| (p - 4000..p).contains(&q)),
+                Some(vec![p - 4096])
+            );
         }
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),

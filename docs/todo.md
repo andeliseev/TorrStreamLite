@@ -6,13 +6,11 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 - [ ] The Keenetic build on a router: kernel compatibility, the real 4K bitrate, seeks, peak memory, CPU, a long run alongside normal router and VPN traffic
 - [ ] The local network prompt the first time other devices are allowed
+- [ ] Downloading from all peers at once on a real swarm: the speed, and that the piece a player waits for still arrives first
 
 ## Performance
 
-- [ ] At most four pieces download at once, so at most four peers send data at the same time. With many slow peers that caps the speed (4K from peers giving 1 MB/s each, for example). Raising it toward the readers' window needs a test on a real swarm
-- [ ] With 16 KiB pieces each new piece still costs a few passes over all 6,144 slots (about 0.3 ms). Keeping the window between pieces, or a bitmap instead of a hashed set, would cut that further if the router needs it
-- [ ] `/api/status`, polled every 1.5 s, carries the whole file list (up to 4,096 paths) and the engine's full stats, though the page only needs the files once per torrent. A separate request for the files would shrink it
-- [ ] The memory figure is the resident size; Activity Monitor shows the physical footprint (`phys_footprint`), so the two can differ
+- [ ] Eviction still looks at every cached piece to find the oldest one it may drop: 6,144 of them with 16 KiB pieces. It's no longer the limit (143 MiB/s, with 3.5 s of server CPU for 384 MiB on an Apple Silicon Mac), so only the router might need better
 
 ## App and UI
 
