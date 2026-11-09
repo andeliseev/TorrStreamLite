@@ -170,7 +170,7 @@ The workflow then:
 2. Works out the version with `scripts/release.py next`. It stops if that isn't newer than the last release, or is lower than the version already in `Cargo.toml`.
 3. Sets it in `Cargo.toml`, `Cargo.lock` and `macos/Info.plist` (`scripts/release.py set`).
 4. Moves the **Unreleased** lines of [`CHANGELOG.md`](../CHANGELOG.md) under `## X.Y.Z (date)` (`scripts/release.py changelog`), leaving an empty Unreleased section for the next changes. With nothing under Unreleased, the run shows a warning and the release has no "What's new".
-5. Commits all that as "Release vX.Y.Z" to `main`. Run `git pull` afterwards, before you commit locally.
+5. Commits all that as "Release vX.Y.Z" to `main`, authored by whoever ran the workflow (with their GitHub noreply address, so no bot appears among the contributors). Run `git pull` afterwards, before you commit locally.
 6. Creates a draft release `vX.Y.Z` whose text starts with **What's new** (those changelog lines), replacing a draft left by a failed run.
 7. Builds the chosen platforms in parallel and uploads them to the draft, each with a `.sha256` file:
    - **macOS:** builds the app on an Apple Silicon runner, verifies its signature, runs the Lampa test against the server inside the app, and packages `TorrStream-Lite-X.Y.Z-macos-arm64.dmg`.
