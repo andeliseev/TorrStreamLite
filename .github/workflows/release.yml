@@ -173,7 +173,16 @@ jobs:
               ...(keenetic ? [`- **Keenetic** (ARM64 router with Entware): the \`linux-arm64.tar.gz\`. Experimental, not yet tested on a router; see the [setup](${repo}/blob/main/docs/router.md)`] : []),
               '',
               'Each download has a `.sha256` checksum file next to it.',
-              ...(macos ? ['', 'The Mac app isn\'t notarized, so macOS asks once before opening it: open the app, then go to **System Settings → Privacy & Security** and click **Open Anyway**.'] : []),
+              ...(macos ? [
+                '',
+                '### First launch on a Mac',
+                'The app isn\'t notarized by Apple yet, so the first time macOS says it could not verify that TorrStream Lite is free of malware. To open it anyway:',
+                '1. Drag TorrStream Lite to **Applications** and open it. When the message appears, click **Done**.',
+                '2. Open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to TorrStream Lite.',
+                '3. Click **Open Anyway** again and confirm with your password or Touch ID.',
+                '',
+                `Or run \`xattr -dr com.apple.quarantine "/Applications/TorrStream Lite.app"\` in Terminal. More in the [README](${repo}#first-launch).`,
+              ] : []),
             ].join('\n');
             const { data } = await github.rest.repos.createRelease({
               ...context.repo,

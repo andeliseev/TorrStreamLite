@@ -29,7 +29,20 @@ Each file has a `.sha256` checksum next to it.
 
 ### First launch
 
-The app isn't notarized by Apple yet, so macOS asks once before opening it: open the app, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+TorrStream Lite isn't notarized by Apple yet (that takes a paid Apple developer membership), so the first time you open it macOS says *"Apple could not verify 'TorrStream Lite' is free of malware that may harm your Mac or compromise your privacy."* To open it anyway:
+
+1. Drag **TorrStream Lite** from the disk image to **Applications**, and open it from there.
+2. When the message appears, click **Done**.
+3. Open **System Settings → Privacy & Security** and scroll down. Next to *"TorrStream Lite" was blocked to protect your Mac*, click **Open Anyway**. The button shows for about an hour after you tried to open the app.
+4. Click **Open Anyway** again and confirm with your password or Touch ID.
+
+macOS remembers this for the copy you allowed; a new version asks again. If you use Terminal, this command does the same:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/TorrStream Lite.app"
+```
+
+The app is open source, and you can check that a download is the one GitHub built: `shasum -a 256` on the file must print the same value as its `.sha256` file.
 
 If macOS asks whether TorrStream Lite may find devices on your local network, click **Allow**. Without it, your TV can't connect.
 
