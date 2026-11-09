@@ -72,7 +72,33 @@ impl TrackerCommsStats {
 
 pub trait TorrentStatsProvider: Send + Sync {
     fn get(&self) -> TrackerCommsStats;
+    /// Called after each announce to `tracker`, for a caller that wants to say why no peers
+    /// came.
+    fn on_announce(&self, _tracker: &Url, _outcome: AnnounceOutcome<'_>) {}
 }
+
+/// How one announce to a tracker went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceOutcome<'a> {
+    /// The tracker answered with this many peers.
+    Peers(usize),
+    /// The tracker answered with its reason for refusing, like "Torrent not registered".
+    Refused(&'a str),
+    /// The tracker couldn't be reached, or its answer couldn't be read.
+    Unreachable,
+}
+
+/// A tracker's own reason for refusing an announce.
+#[derive(Debug)]
+pub(crate) struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tracker returned failure. Failure reason: {}", self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 impl TorrentStatsProvider for () {
     fn get(&self) -> TrackerCommsStats {
@@ -265,6 +291,28 @@ impl TrackerComms {
         tracker_url: &Url,
         event: Option<tracker_comms_http::TrackerRequestEvent>,
     ) -> anyhow::Result<Duration> {
+        let result = self.http_announce(tracker_url, event).await;
+        if let Err(e) = &result {
+            self.report_failure(tracker_url, e);
+        }
+        result
+    }
+
+    fn report_failure(&self, tracker_url: &Url, e: &anyhow::Error) {
+        self.stats.on_announce(
+            tracker_url,
+            match e.downcast_ref::<Refused>() {
+                Some(r) => AnnounceOutcome::Refused(&r.0),
+                None => AnnounceOutcome::Unreachable,
+            },
+        );
+    }
+
+    async fn http_announce(
+        &self,
+        tracker_url: &Url,
+        event: Option<tracker_comms_http::TrackerRequestEvent>,
+    ) -> anyhow::Result<Duration> {
         let stats = self.stats.get();
         let request = tracker_comms_http::TrackerRequest {
             info_hash: &self.info_hash,
@@ -298,10 +346,7 @@ impl TrackerComms {
         if let Ok((error, _)) =
             bencode::from_bytes_with_rest::<tracker_comms_http::TrackerError>(&bytes)
         {
-            anyhow::bail!(
-                "tracker returned failure. Failure reason: {}",
-                error.failure_reason
-            )
+            return Err(Refused(error.failure_reason.to_string()).into());
         };
         let response = bencode::from_bytes_with_rest::<tracker_comms_http::TrackerResponse>(&bytes)
             .map_err(|e| {
@@ -310,6 +355,15 @@ impl TrackerComms {
             })?
             .0;
 
+        let peers = response.iter_peers().count();
+        trace!(
+            seeders = response.complete,
+            leechers = response.incomplete,
+            peers,
+            "received announce response"
+        );
+        self.stats
+            .on_announce(tracker_url, AnnounceOutcome::Peers(peers));
         for peer in response.iter_peers() {
             self.tx.send(peer).await?;
         }
@@ -361,7 +415,7 @@ impl TrackerComms {
             match addrs {
                 UdpTrackerResolveResult::One(addr) => {
                     match self
-                        .tracker_one_request_udp(addr, &client)
+                        .tracker_one_request_udp(&url, addr, &client)
                         .instrument(trace_span!("udp request", ?addr))
                         .await
                     {
@@ -373,9 +427,9 @@ impl TrackerComms {
                 }
                 UdpTrackerResolveResult::Two(v4, v6) => {
                     let (r4, r6) = tokio::join!(
-                        self.tracker_one_request_udp(v4.into(), &client)
+                        self.tracker_one_request_udp(&url, v4.into(), &client)
                             .instrument(trace_span!("udp request", addr=?v4)),
-                        self.tracker_one_request_udp(v6.into(), &client)
+                        self.tracker_one_request_udp(&url, v6.into(), &client)
                             .instrument(trace_span!("udp request", addr=?v6))
                     );
                     sleep_interval = Some(
@@ -391,6 +445,7 @@ impl TrackerComms {
 
     async fn tracker_one_request_udp(
         &self,
+        tracker_url: &Url,
         addr: SocketAddr,
         client: &UdpTrackerClient,
     ) -> anyhow::Result<Duration> {
@@ -422,6 +477,8 @@ impl TrackerComms {
         match client.announce(addr, request).await {
             Ok(response) => {
                 trace!(len = response.addrs.len(), "received announce response");
+                self.stats
+                    .on_announce(tracker_url, AnnounceOutcome::Peers(response.addrs.len()));
                 for addr in response.addrs {
                     self.tx.send(addr).await.context("rx closed")?;
                 }
@@ -431,6 +488,7 @@ impl TrackerComms {
             }
             Err(e) => {
                 debug!(?addr, "error reading announce response: {e:#}");
+                self.report_failure(tracker_url, &e);
                 Err(e)
             }
         }

@@ -541,25 +541,25 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
 fn lookup_json(l: &Lookup) -> Value {
     let c = l.counts.counts();
     json!({"peers_found":c.found, "peers_asked":c.asked, "peers_failed":c.failed,
+        "trackers_answered":c.trackers_answered, "trackers_refused":c.trackers_refused,
+        "tracker_error":l.counts.tracker_refusal(),
         "seconds":l.started.elapsed().as_secs()})
 }
-/// Why a magnet link's details didn't come in time, from what its lookup saw.
-fn lookup_failed(c: MetadataLookupCounts, seconds: u64) -> String {
-    if c.found == 0 {
-        format!(
-            "Couldn't get the torrent's details: no peers were found in {seconds} seconds. Its \
-             trackers and the DHT returned none; it may have no seeders, or a VPN or your \
-             network may be blocking them."
-        )
-    } else if c.failed >= c.found && c.found == 1 {
+/// Why a magnet link's details didn't come in time, from what its lookup saw. `refusal` is
+/// the reason trackers gave for refusing the torrent, if any did.
+fn lookup_failed(c: MetadataLookupCounts, refusal: Option<&str>, seconds: u64) -> String {
+    let nobody_answered = c.found == 0 || c.failed >= c.found;
+    let what = if c.found == 0 {
+        format!("Couldn't get the torrent's details: no peers were found in {seconds} seconds.")
+    } else if nobody_answered && c.found == 1 {
         format!(
             "Couldn't get the torrent's details: the one peer found in {seconds} seconds didn't \
-             answer. It may be offline, or out of reach through a VPN."
+             answer."
         )
-    } else if c.failed >= c.found {
+    } else if nobody_answered {
         format!(
             "Couldn't get the torrent's details: none of the {} peers found in {seconds} seconds \
-             answered. They may be offline, or out of reach through a VPN.",
+             answered.",
             c.found
         )
     } else if c.failed == 0 && c.found == 1 {
@@ -579,7 +579,56 @@ fn lookup_failed(c: MetadataLookupCounts, seconds: u64) -> String {
              answer, and the rest hadn't sent them yet.",
             c.found, c.failed
         )
-    }
+    };
+    // What a tracker says comes first: it knows whether the torrent still exists there. Open
+    // trackers answer for any torrent, so their answers don't make a refusal less telling, but
+    // with them it's one tracker's word.
+    let whose = if c.trackers_answered == 0 {
+        "Its tracker"
+    } else {
+        "One of its trackers"
+    };
+    let why = match refusal {
+        Some(reason) if says_unregistered(reason) && c.trackers_answered == 0 => format!(
+            " {whose} answered “{reason}”: the torrent was probably removed there or replaced \
+             with a newer one. Look for it again, or pick another."
+        ),
+        Some(reason) if says_unregistered(reason) => format!(
+            " {whose} answered “{reason}”: the torrent may have been removed there or replaced \
+             with a newer one. Look for it again, or pick another."
+        ),
+        Some(reason) => format!(" {whose} answered “{reason}”."),
+        None if !nobody_answered => String::new(),
+        None if c.found == 0 && c.trackers_answered > 0 => {
+            " Its trackers know no peers and the DHT returned none, so it probably has no \
+             seeders right now."
+                .into()
+        }
+        None if c.found == 0 => " Its trackers and the DHT returned none; it may have no \
+                                 seeders, or a VPN or your network may be blocking them."
+            .into(),
+        None if c.found == 1 => {
+            " It may be offline, or behind a router that doesn't accept connections.".into()
+        }
+        None => " They may be offline, or behind routers that don't accept connections.".into(),
+    };
+    what + &why
+}
+/// True when a tracker's reason for refusing says it doesn't have the torrent (any more), and
+/// not, say, that it doesn't know the user.
+fn says_unregistered(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    [
+        "not registered",
+        "unregistered",
+        "torrent not found",
+        "hash not found",
+        "unknown torrent",
+        "torrent does not exist",
+        "not authorized for use",
+    ]
+    .iter()
+    .any(|phrase| reason.contains(phrase))
 }
 async fn peer_details(State(state): State<Arc<AppState>>) -> Response {
     let active = state.active.lock().await.clone();
@@ -843,7 +892,9 @@ async fn start_torrent(
                 _ => ApiError(
                     StatusCode::GATEWAY_TIMEOUT,
                     match &lookup {
-                        Some(l) => lookup_failed(l.counts(), seconds),
+                        Some(l) => {
+                            lookup_failed(l.counts(), l.tracker_refusal().as_deref(), seconds)
+                        }
                         None => format!("The torrent didn't start in {seconds} seconds."),
                     },
                 ),
@@ -1438,22 +1489,83 @@ mod tests {
 
     #[test]
     fn a_failed_lookup_says_whether_peers_were_found_and_answered() {
-        let failed = |found, asked, failed| {
-            lookup_failed(
-                MetadataLookupCounts {
-                    found,
-                    asked,
-                    failed,
-                },
-                85,
-            )
+        let counts = |found, asked, failed, trackers_answered| MetadataLookupCounts {
+            found,
+            asked,
+            failed,
+            trackers_answered,
+            trackers_refused: 0,
         };
+        let failed =
+            |found, asked, failed| lookup_failed(counts(found, asked, failed, 0), None, 85);
         assert!(failed(0, 0, 0).contains("no peers were found in 85 seconds"));
+        assert!(failed(0, 0, 0).contains("a VPN or your network may be blocking them"));
         assert!(failed(1, 1, 1).contains("the one peer found in 85 seconds didn't answer"));
         assert!(failed(12, 12, 12).contains("none of the 12 peers found in 85 seconds answered"));
+        assert!(failed(12, 12, 12).contains("behind routers that don't accept connections"));
+        assert!(
+            !failed(12, 12, 12).contains("VPN"),
+            "silent peers aren't the VPN's doing"
+        );
         assert!(failed(40, 34, 30).contains("40 peers found, 30 didn't answer"));
         assert!(failed(1, 1, 0).contains("1 peer found, but it hadn't sent them yet"));
-        assert!(failed(3, 3, 0).contains("3 peers found, but none had sent them yet"));
+        assert!(failed(3, 3, 0).ends_with("3 peers found, but none had sent them yet."));
+        // Trackers that answer with no peers aren't blocked.
+        let empty = lookup_failed(counts(0, 0, 0, 2), None, 85);
+        assert!(
+            empty.contains("probably has no seeders right now"),
+            "{empty}"
+        );
+    }
+
+    #[test]
+    fn a_failed_lookup_says_what_the_tracker_answered() {
+        let counts = MetadataLookupCounts {
+            found: 7,
+            asked: 7,
+            failed: 7,
+            trackers_answered: 0,
+            trackers_refused: 4,
+        };
+        let gone = lookup_failed(counts, Some("Torrent not registered"), 85);
+        assert!(
+            gone.contains("none of the 7 peers found in 85 seconds answered"),
+            "{gone}"
+        );
+        assert!(
+            gone.contains("Its tracker answered “Torrent not registered”"),
+            "{gone}"
+        );
+        assert!(
+            gone.contains("removed there or replaced with a newer one"),
+            "{gone}"
+        );
+        assert!(!gone.contains("behind routers"), "{gone}");
+        let other = lookup_failed(counts, Some("Slow down"), 85);
+        assert!(
+            other.ends_with("Its tracker answered “Slow down”."),
+            "{other}"
+        );
+        // Open trackers answer for any torrent; the refusal still shows, as one tracker's word.
+        let counts = MetadataLookupCounts {
+            trackers_answered: 3,
+            ..counts
+        };
+        let mixed = lookup_failed(counts, Some("Torrent not registered"), 85);
+        assert!(
+            mixed.ends_with(
+                "none of the 7 peers found in 85 seconds answered. One of its trackers answered \
+                 “Torrent not registered”: the torrent may have been removed there or replaced \
+                 with a newer one. Look for it again, or pick another."
+            ),
+            "{mixed}"
+        );
+        assert!(says_unregistered("unregistered torrent"));
+        assert!(says_unregistered(
+            "Torrent is not authorized for use on this tracker"
+        ));
+        assert!(!says_unregistered("Rate limit exceeded"));
+        assert!(!says_unregistered("User not found"));
     }
 
     #[test]

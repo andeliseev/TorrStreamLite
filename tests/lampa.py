@@ -280,8 +280,10 @@ def main():
             assert status['lookup'] is None and status['torrent'] is None, status
             assert status['add_error'] == ("“[LAMPA] Gone movie” didn't load. Couldn't get the torrent's "
                                            "details: the one peer found in 8 seconds didn't answer. It may be "
-                                           "offline, or out of reach through a VPN."), status
+                                           "offline, or behind a router that doesn't accept connections."), status
             error(404, '/torrents', data={'action': 'get', 'hash': gone.info_hash.hex()})
+            # Before the details come the size isn't known, and "nothing left" would read as a seeder.
+            assert gone.announced_left and '0' not in gone.announced_left, gone.announced_left
             # The window's own add says why in its reply, and clears the last one's reason.
             try:
                 request('/api/torrents', {'link': magnet_of(empty)}, origin=base,
@@ -291,9 +293,40 @@ def main():
                 reason = json.load(exc)['error']
             else:
                 raise AssertionError('A magnet link with no peers was added')
-            assert reason.startswith("Couldn't get the torrent's details: no peers were found in 8 seconds"), reason
+            assert reason == ("Couldn't get the torrent's details: no peers were found in 8 seconds. Its trackers "
+                              "know no peers and the DHT returned none, so it probably has no seeders right "
+                              "now."), reason
             assert api('/api/status', origin=base)['add_error'] is None
             mark('A magnet link whose details never come says why: no peers found, or none answered')
+
+            # A tracker that no longer has the torrent says so, and that's the reason shown.
+            gone.unregistered = True
+            api('/torrents', lampa_add(magnet_of(gone), 'Replaced movie'), timeout=5)
+            started = time.monotonic()
+            while api('/api/status', origin=base)['resolving']:
+                lookup = api('/api/status', origin=base)['lookup']
+                assert time.monotonic() - started < 15, 'The lookup never gave up'
+                time.sleep(.2)
+            assert lookup['tracker_error'] == 'Torrent not registered' and lookup['trackers_answered'] == 0, lookup
+            assert api('/api/status', origin=base)['add_error'] == (
+                "“[LAMPA] Replaced movie” didn't load. Couldn't get the torrent's details: no peers were "
+                "found in 8 seconds. Its tracker answered “Torrent not registered”: the torrent was probably "
+                "removed there or replaced with a newer one. Look for it again, or pick another.")
+            # Open trackers answer for any torrent; their answer doesn't hide the refusal.
+            both = magnet_of(gone) + '&tr=' + urllib.parse.quote(empty.tracker_url, safe='')
+            api('/torrents', lampa_add(both, 'Replaced movie'), timeout=5)
+            started = time.monotonic()
+            while api('/api/status', origin=base)['resolving']:
+                lookup = api('/api/status', origin=base)['lookup']
+                assert time.monotonic() - started < 15, 'The lookup never gave up'
+                time.sleep(.2)
+            assert (lookup['tracker_error'], lookup['trackers_answered'], lookup['trackers_refused']) == (
+                'Torrent not registered', 1, 1), lookup
+            assert api('/api/status', origin=base)['add_error'] == (
+                "“[LAMPA] Replaced movie” didn't load. Couldn't get the torrent's details: no peers were "
+                "found in 8 seconds. One of its trackers answered “Torrent not registered”: the torrent may "
+                "have been removed there or replaced with a newer one. Look for it again, or pick another.")
+            mark('A magnet link its tracker no longer has says so')
             report.write_text(json.dumps({'passed': passed, 'physical_tv_tested': False}, indent=2) + '\n')
         finally:
             process.terminate()

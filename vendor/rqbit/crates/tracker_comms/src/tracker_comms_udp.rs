@@ -371,7 +371,7 @@ impl UdpTrackerClient {
             .context("sender dead")?;
         match &response {
             Response::Error(e) => {
-                anyhow::bail!("remote errored: {e}")
+                return Err(crate::tracker_comms::Refused(e.clone()).into());
             }
             Response::Unknown => {
                 anyhow::bail!("remote replied with something we could not parse")

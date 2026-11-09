@@ -1255,6 +1255,7 @@ impl Session {
                 opts.force_tracker_interval,
                 opts.initial_peers.clone().unwrap_or_default(),
                 private,
+                opts.metadata_lookup.clone(),
             )
         };
 
@@ -1553,6 +1554,7 @@ impl Session {
             t.shared().options.force_tracker_interval,
             t.shared().options.initial_peers.clone(),
             is_private,
+            None,
         )
     }
 
@@ -1565,6 +1567,7 @@ impl Session {
         force_tracker_interval: Option<Duration>,
         initial_peers: Vec<SocketAddr>,
         is_private: bool,
+        lookup: Option<Arc<MetadataLookup>>,
     ) -> Option<PeerStream> {
         let dht_rx = if is_private {
             None
@@ -1599,6 +1602,7 @@ impl Session {
         let tracker_rx_stats = PeerRxTorrentInfo {
             info_hash,
             session: self.clone(),
+            lookup,
         };
         let tracker_rx = TrackerComms::start(
             info_hash,
@@ -1800,9 +1804,23 @@ fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {
 struct PeerRxTorrentInfo {
     info_hash: Id20,
     session: Arc<Session>,
+    /// The magnet link's lookup these trackers serve, told what they answer.
+    lookup: Option<Arc<MetadataLookup>>,
 }
 
+/// What trackers hear is left of a torrent whose size isn't known: a magnet link whose
+/// details are on the way, or a torrent that hasn't started. "Nothing left" reads as a
+/// seeder, and many trackers send seeders no other seeders, the peers that have the details.
+/// libtorrent reports the same amount.
+const LEFT_WHEN_SIZE_UNKNOWN: u64 = 16 * 1024;
+
 impl tracker_comms::TorrentStatsProvider for PeerRxTorrentInfo {
+    fn on_announce(&self, tracker: &url::Url, outcome: tracker_comms::AnnounceOutcome<'_>) {
+        if let Some(lookup) = &self.lookup {
+            lookup.tracker_answered(tracker, outcome);
+        }
+    }
+
     fn get(&self) -> tracker_comms::TrackerCommsStats {
         let mt = self.session.with_torrents(|torrents| {
             for (_, mt) in torrents {
@@ -1816,7 +1834,10 @@ impl tracker_comms::TorrentStatsProvider for PeerRxTorrentInfo {
             Some(mt) => mt,
             None => {
                 trace!(info_hash=?self.info_hash, "can't find torrent in the session, using default stats");
-                return Default::default();
+                return tracker_comms::TrackerCommsStats {
+                    total_bytes: LEFT_WHEN_SIZE_UNKNOWN,
+                    ..Default::default()
+                };
             }
         };
         let stats = mt.stats();
@@ -1839,6 +1860,9 @@ impl tracker_comms::TorrentStatsProvider for PeerRxTorrentInfo {
                 .and_then(|l| l.get_hns())
                 .map_or(0, |h| h.have_bytes);
             (cached.min(total.saturating_sub(1)), total)
+        } else if stats.total_bytes == 0 {
+            // Not live yet, and no files are selected (RAM storage selects none).
+            (0, LEFT_WHEN_SIZE_UNKNOWN)
         } else {
             (stats.progress_bytes, stats.total_bytes)
         };

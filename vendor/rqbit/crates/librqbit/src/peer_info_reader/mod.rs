@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use anyhow::Context;
 use bencode::from_bytes;
 use buffers::{ByteBuf, ByteBufOwned};
 use bytes::Bytes;
@@ -38,6 +39,7 @@ pub(crate) async fn read_metainfo_from_peer(
     spawner: BlockingSpawner,
     connector: Arc<StreamConnector>,
     client_name_and_version: String,
+    buffers: Arc<tokio::sync::Semaphore>,
 ) -> anyhow::Result<TorrentAndInfoBytes> {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<
         Result<(TorrentMetaV1Info<ByteBufOwned>, ByteBufOwned), bencode::DeserializeError>,
@@ -50,6 +52,7 @@ pub(crate) async fn read_metainfo_from_peer(
         result_tx: Mutex::new(Some(result_tx)),
         locked: RwLock::new(None),
         client_name_and_version,
+        buffers,
     };
     let connection = PeerConnection::new(
         addr,
@@ -80,10 +83,12 @@ struct HandlerLocked {
     total_pieces: usize,
     buffer: Vec<u8>,
     received_pieces: Vec<bool>,
+    /// Held while `buffer` is: it can be 2 MiB, and only a few peers may fill one at a time.
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl HandlerLocked {
-    fn new(metadata_size: u32) -> anyhow::Result<Self> {
+    fn new(metadata_size: u32, permit: tokio::sync::OwnedSemaphorePermit) -> anyhow::Result<Self> {
         if metadata_size == 0 || metadata_size > 2 * 1024 * 1024 {
             anyhow::bail!("metadata size {} is too big", metadata_size);
         }
@@ -97,6 +102,7 @@ impl HandlerLocked {
             received_pieces,
             buffer,
             total_pieces,
+            _permit: Some(permit),
         })
     }
     fn piece_size(&self, index: u32) -> usize {
@@ -160,6 +166,8 @@ struct Handler {
     >,
     locked: RwLock<Option<HandlerLocked>>,
     client_name_and_version: String,
+    /// One permit per metadata buffer, shared by a lookup's connections.
+    buffers: Arc<tokio::sync::Semaphore>,
 }
 
 impl PeerConnectionHandler for Handler {
@@ -240,7 +248,14 @@ impl PeerConnectionHandler for Handler {
         self.writer_tx
             .send(WriterRequest::Message(Message::Interested))?;
 
-        let inner = HandlerLocked::new(metadata_size)?;
+        // Many peers are asked at once, since most never answer, but the details can be
+        // 2 MiB, so only a few may send them at a time. The ones already sending will do.
+        let permit = self
+            .buffers
+            .clone()
+            .try_acquire_owned()
+            .context("enough peers are sending the details already")?;
+        let inner = HandlerLocked::new(metadata_size, permit)?;
         let total_pieces = inner.total_pieces;
 
         self.locked.write().replace(inner);

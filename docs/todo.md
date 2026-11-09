@@ -10,6 +10,9 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 ## Performance
 
+- [ ] Swarms whose peers accept no connections can't be used: the app only connects out, over TCP. Measured on a real swarm of 217 addresses (direct connection, no VPN): 49 accepted TCP, 17 answered the handshake (8%), 28 were junk that reset at once, and uTP reached only 2 more. A small torrent's 5–9 addresses can all be dead. What other clients add is incoming connections: a listening port announced to trackers and the DHT, opened with UPnP. That's a listener facing the internet, to be designed with the security rules
+- [ ] A magnet link's lookup asks each peer once. When all have failed and no new ones come, ask them again instead of waiting out the 85 s
+- [ ] Every add announces to the trackers again, also inside their minimum interval: Lampa's retries make that every 90 s. Remember a tracker's last answer for the same torrent for its interval
 - [ ] Reserving a slot zeroes the whole piece (up to 32 MiB) under the engine's lock, and each eviction walks every file to update per-file counters
 - [ ] Eviction still looks at every cached piece to find the oldest one it may drop: 6,144 of them with 16 KiB pieces. It's no longer the limit (143 MiB/s, with 3.5 s of server CPU for 384 MiB on an Apple Silicon Mac), so only the router might need better
 - [ ] The piece a player waits for downloads from one peer at a time, and nothing plays until all of it is checked. With the 8 MiB pieces common for films and peers at 1–2 MB/s, a seek waits 4–8 s. Fetch it from several peers at once, or read its chunks before the piece is checked, as TorrServer does
@@ -24,6 +27,7 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 ## App and UI
 
+- [ ] While a magnet link loads, show what its tracker answered (`lookup.tracker_error` in `/api/status`), not only after it gave up
 - [ ] An optional password for home network access (**Allow other devices**). Lampa supports TorrServer's login and password, and it would also keep web pages open on other devices away from the TV address
 - [ ] Cancel while a magnet link added in the window is resolving. Lampa's adds resolve in the background and Stop cancels them, but the window's own add holds the add/stop lock for up to 85 s, so Stop can't interrupt it
 - [ ] Check the transparent titlebar by hand, on macOS 26 and an older version: the window buttons over the sidebar, dragging by the top band, double-click to zoom

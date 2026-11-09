@@ -158,10 +158,15 @@ class Swarm:
             def do_GET(self):
                 if self.path.startswith('/file.torrent'):
                     data=swarm.torrent
+                elif swarm.unregistered:
+                    data=bencode({b'failure reason':b'Torrent not registered'})
                 else:
+                    swarm.announced_left+=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('left',[])
                     compact=b''.join(socket.inet_aton('127.0.0.1')+struct.pack('!H',p.server_address[1]) for p in peers)
                     data=bencode({b'interval':2,b'complete':len(peers),b'incomplete':0,b'peers':compact})
                 self.send_response(200); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+        # Set `unregistered` to make the tracker refuse the torrent; `announced_left` is what clients said they have left.
+        self.unregistered=False; self.announced_left=[]
         self.tracker=http.server.ThreadingHTTPServer(('127.0.0.1',0),Tracker)
         self.tracker_url=f'http://127.0.0.1:{self.tracker.server_address[1]}/announce'
         self.torrent=bencode({b'announce':self.tracker_url.encode(),b'info':bdecode(self.info)[0]})

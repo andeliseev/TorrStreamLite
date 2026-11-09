@@ -82,7 +82,7 @@ The local peer speaks the real BitTorrent protocol and never contacts public swa
 - One torrent at a time, invalid ranges, and HEAD requests that download nothing
 - Stop during a slow HTTP response, cache teardown, and no files written by the server
 - TV access: a reachable LAN listener, range streaming and LAN playlist links, refusing settings changes from the network, the opaque `null` origin of TV apps (accepted there, refused on the loopback server), stopping TV streams without stopping Mac playback, invalid ports and port conflicts
-- A magnet link whose details never come, because its only peer is gone or its tracker returns no peers: the window's status counts the peers found and failed, then says why the torrent didn't load
+- A magnet link whose details never come, because its only peer is gone, its tracker returns no peers, or its tracker no longer has the torrent: the window's status counts the peers found and failed, then says why the torrent didn't load, with the tracker's own reason; and before the details come, the tracker isn't told that nothing is left to download
 - Lampa's sequence: ping, form-labelled JSON from Lampa's web origin, adding by torrent URL, file selection, delayed preload progress, cache statistics, playback and seeking, watched positions and teardown; and that Lampa can't change TV access and other browser origins are refused
 - Requests addressed to unknown host names (DNS rebinding) are refused, and a cross-site stream URL can't add a torrent
 - Decoding a generated 3840×2160 H.264 clip through the Mac server: all 288 frame hashes and a seek match the original
