@@ -8,8 +8,8 @@
 <key>CFBundleIdentifier</key><string>com.andeliseev.torrstream-lite</string>
 <key>CFBundleName</key><string>TorrStream Lite</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.7</string>
-<key>CFBundleVersion</key><string>0.2.7</string>
+<key>CFBundleShortVersionString</key><string>0.2.8</string>
+<key>CFBundleVersion</key><string>0.2.8</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSLocalNetworkUsageDescription</key><string>Allow your TV to connect to TorrStream Lite on your home network.</string>
