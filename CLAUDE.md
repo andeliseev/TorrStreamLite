@@ -6,7 +6,7 @@
 
 - `sh scripts/cargo.sh test --locked`, `sh scripts/cargo.sh clippy --locked --all-targets -- -D warnings`, `sh scripts/cargo.sh fmt --all`: unit tests, lints and formatting
 - `sh scripts/build-macos.sh`: the Mac app in `dist/`, and the release server binary the Python tests use
-- `python3 tests/e2e.py --size-mib 32 --corrupt-first`, `python3 tests/lampa.py`, `python3 tests/network.py`: streaming, Lampa and TV access tests against a local BitTorrent peer (add `--binary target/debug/torrstream-lite` after a debug build)
+- `python3 tests/e2e.py --size-mib 32 --corrupt-first`, `python3 tests/e2e.py --size-mib 32 --stalling-peer`, `python3 tests/lampa.py`, `python3 tests/network.py`: streaming, Lampa and TV access tests against a local BitTorrent peer (add `--binary target/debug/torrstream-lite` after a debug build)
 - `python3 tests/release.py`, `node tests/peer-rates.cjs`: release helper and peer speed tests
 - `npx prettier@3.6.2 --write ui/` and `xcrun swift-format format --in-place macos/App.swift`: formatting for the page and the Mac app
 - `xcrun swift scripts/make-icon.swift`: regenerate `macos/AppIcon.icns` from `app-icon.svg`

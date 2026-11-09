@@ -56,6 +56,8 @@ jobs:
       - run: node tests/peer-rates.cjs
       - run: cargo build --locked
       - run: python3 tests/e2e.py --binary target/debug/torrstream-lite --size-mib 32 --corrupt-first
+      # Adds a peer that stops answering, like one that chokes the engine mid-piece.
+      - run: python3 tests/e2e.py --binary target/debug/torrstream-lite --size-mib 32 --stalling-peer --report test-results/stalling-peer.json
       - run: python3 tests/lampa.py --binary target/debug/torrstream-lite
       # Uses the runner's private network address, like a TV on a home network.
       - run: python3 tests/network.py --binary target/debug/torrstream-lite

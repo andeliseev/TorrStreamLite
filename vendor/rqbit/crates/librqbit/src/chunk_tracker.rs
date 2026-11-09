@@ -316,6 +316,14 @@ impl ChunkTracker {
             .unwrap_or(false)
     }
 
+    /// Whether this chunk has been received, even if the rest of its piece hasn't.
+    pub(crate) fn is_chunk_downloaded(&self, chunk: &ChunkInfo) -> bool {
+        self.chunk_status
+            .get(self.lengths.chunk_range(chunk.piece_index))
+            .and_then(|chunks| chunks.get(chunk.chunk_index as usize).map(|b| *b))
+            .unwrap_or(false)
+    }
+
     pub fn get_remaining_bytes(&self) -> u64 {
         self.hns.needed_bytes
     }

@@ -39,11 +39,20 @@ python3 tests/release.py
 node tests/peer-rates.cjs
 ```
 
+The engine's own unit tests, in `vendor/rqbit`, aren't part of `cargo test`. Run them from its workspace; that updates its lockfile, so restore it afterwards:
+
+```sh
+cd vendor/rqbit
+cargo test -p librqbit --no-default-features --features rust-tls,disable-upload --lib --target-dir ../../target/rqbit-tests
+git checkout Cargo.lock
+```
+
 The streaming tests start a real server against a local BitTorrent peer that serves generated data. They use `target/release/torrstream-lite`, which `scripts/build-macos.sh` builds; after a debug build (`sh scripts/cargo.sh build --locked`), add `--binary target/debug/torrstream-lite`.
 
 ```sh
 python3 tests/e2e.py --cache-mib 6 --size-mib 64
 python3 tests/e2e.py --cache-mib 6 --size-mib 64 --corrupt-first --report test-results/corruption-recovery.json
+python3 tests/e2e.py --cache-mib 6 --size-mib 64 --stalling-peer --report test-results/stalling-peer.json
 python3 tests/e2e.py --cache-mib 96 --size-mib 256 --rate-mbps 80 --report test-results/router-profile.json
 python3 tests/lampa.py
 python3 tests/network.py
@@ -65,6 +74,7 @@ The local peer speaks the real BitTorrent protocol and never contacts public swa
 - Whole files larger than the cache, with every byte checked
 - Backward and forward seeks, suffix ranges, overlapping head and tail requests, and pieces that span files
 - Magnet metadata exchange, rejecting and recovering from a corrupted piece, and bounded allocation
+- A second peer that unchokes the engine and then answers nothing, as a peer that chokes it mid-piece does: the other peer takes over its pieces, and no read waits 15 s or more
 - One torrent at a time, invalid ranges, and HEAD requests that download nothing
 - Stop during a slow HTTP response, cache teardown, and no files written by the server
 - TV access: a reachable LAN listener, range streaming and LAN playlist links, refusing settings changes from the network, the opaque `null` origin of TV apps (accepted there, refused on the loopback server), stopping TV streams without stopping Mac playback, invalid ports and port conflicts

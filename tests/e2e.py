@@ -62,7 +62,7 @@ def recv_exact(sock, n):
     return bytes(out)
 
 class Swarm:
-    def __init__(self, size_mib, corrupt=False, source=None):
+    def __init__(self, size_mib, corrupt=False, source=None, stalling_peer=False):
         self.source = Path(source) if source else None
         self.prefix = 0 if source else PIECE + 123
         self.movie_size = self.source.stat().st_size if source else size_mib * 1024 * 1024
@@ -73,7 +73,10 @@ class Swarm:
             b'files':files})
         self.info_hash = hashlib.sha1(self.info).digest()
         self.corrupt = corrupt; self.corrupted = False; self.lock = threading.Lock()
-        self.bytes_served = 0
+        self.bytes_served = 0; self.stalled_requests = 0
+        count=len(self.hashes)//20
+        bits=bytearray([255]*((count+7)//8))
+        if count%8: bits[-1]=(255 << (8-count%8))&255
         swarm = self
         class Peer(socketserver.BaseRequestHandler):
             def handle(self):
@@ -83,9 +86,6 @@ class Swarm:
                     handshake=recv_exact(s,68)
                     if handshake[28:48]!=swarm.info_hash: return
                     s.sendall(b'\x13BitTorrent protocol'+b'\0\0\0\0\0\x10\0\0'+swarm.info_hash+b'-PY0001-123456789012')
-                    count=len(swarm.hashes)//20
-                    bits=bytearray([255]*((count+7)//8))
-                    if count%8: bits[-1]=(255 << (8-count%8))&255
                     send(b'\x05'+bits); send(b'\x01')
                     send(b'\x14\x00'+bencode({b'm':{b'ut_metadata':1},b'metadata_size':len(swarm.info),b'reqq':16}))
                     meta_id=1
@@ -110,25 +110,52 @@ class Swarm:
                                 i=value[b'piece']; part=swarm.info[i*BLOCK:(i+1)*BLOCK]
                                 send(bytes([20,meta_id])+bencode({b'msg_type':1,b'piece':i,b'total_size':len(swarm.info)})+part)
                 except (EOFError, OSError, ValueError): pass
+        class Staller(socketserver.BaseRequestHandler):
+            # Like a peer that chokes us mid-piece: it unchokes us, answers no request,
+            # and stays connected with keep-alives.
+            def handle(self):
+                s=self.request; s.settimeout(30); lock=threading.Lock(); done=threading.Event()
+                def send(data):
+                    with lock: s.sendall(struct.pack('!I',len(data))+data)
+                def keep_alive():
+                    while not done.wait(4):
+                        try: send(b'')
+                        except OSError: return
+                try:
+                    handshake=recv_exact(s,68)
+                    if handshake[28:48]!=swarm.info_hash: return
+                    s.sendall(b'\x13BitTorrent protocol'+b'\0'*8+swarm.info_hash+b'-PY0002-123456789012')
+                    send(b'\x05'+bits); send(b'\x01')
+                    threading.Thread(target=keep_alive,daemon=True).start()
+                    s.settimeout(None)
+                    while True:
+                        n=struct.unpack('!I',recv_exact(s,4))[0]
+                        if n and recv_exact(s,n)[0]==6:
+                            with swarm.lock: swarm.stalled_requests+=1
+                except (EOFError, OSError, ValueError): pass
+                finally: done.set()
         class Server(socketserver.ThreadingTCPServer):
             allow_reuse_address=True; daemon_threads=True
         self.peer=Server(('127.0.0.1',0),Peer)
+        self.staller=Server(('127.0.0.1',0),Staller) if stalling_peer else None
+        peers=[s for s in [self.staller,self.peer] if s]
         class Tracker(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args): pass
             def do_GET(self):
                 if self.path.startswith('/file.torrent'):
                     data=swarm.torrent
                 else:
-                    compact=socket.inet_aton('127.0.0.1')+struct.pack('!H',swarm.peer.server_address[1])
-                    data=bencode({b'interval':2,b'complete':1,b'incomplete':0,b'peers':compact})
+                    compact=b''.join(socket.inet_aton('127.0.0.1')+struct.pack('!H',p.server_address[1]) for p in peers)
+                    data=bencode({b'interval':2,b'complete':len(peers),b'incomplete':0,b'peers':compact})
                 self.send_response(200); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
         self.tracker=http.server.ThreadingHTTPServer(('127.0.0.1',0),Tracker)
         self.tracker_url=f'http://127.0.0.1:{self.tracker.server_address[1]}/announce'
         self.torrent=bencode({b'announce':self.tracker_url.encode(),b'info':bdecode(self.info)[0]})
-        for server in [self.peer,self.tracker]: threading.Thread(target=server.serve_forever,daemon=True).start()
+        self.servers=peers+[self.tracker]
+        for server in self.servers: threading.Thread(target=server.serve_forever,daemon=True).start()
 
     def close(self):
-        for s in [self.peer,self.tracker]: s.shutdown(); s.server_close()
+        for s in self.servers: s.shutdown(); s.server_close()
 
     def data_at(self, offset, length):
         if not self.source: return payload(offset,length)
@@ -142,10 +169,11 @@ def main():
     parser.add_argument('--size-mib',type=int,default=64)
     parser.add_argument('--rate-mbps',type=float,default=0)
     parser.add_argument('--corrupt-first',action='store_true')
+    parser.add_argument('--stalling-peer',action='store_true',help='add a peer that answers no requests')
     parser.add_argument('--report',default='test-results/e2e.json')
     args=parser.parse_args()
     binary=str(Path(args.binary).resolve()); report=Path(args.report).resolve(); report.parent.mkdir(parents=True,exist_ok=True)
-    swarm=Swarm(args.size_mib,args.corrupt_first)
+    swarm=Swarm(args.size_mib,args.corrupt_first,stalling_peer=args.stalling_peer)
     with tempfile.TemporaryDirectory(prefix='torrstream-lite-e2e-') as tmp:
         log_path=report.with_suffix('.log')
         with log_path.open('w') as log:
@@ -179,13 +207,16 @@ def main():
             with request('/api/stream/2',method='HEAD') as r: assert int(r.headers['Content-Length'])==swarm.movie_size
             assert js()['cache']['reserved_bytes']==0
             mark('HEAD does not download')
+            longest_wait=[0.0]
             def read_range(offset,length,path='/api/stream/2',rate=0):
                 started=time.monotonic(); total=0
                 with request(path,headers={'Range':f'bytes={offset}-{offset+length-1}'}) as r:
                     assert r.status==206
                     assert r.headers['Content-Range']==f'bytes {offset}-{offset+length-1}/{swarm.movie_size}'
                     while total<length:
+                        asked=time.monotonic()
                         chunk=r.read(min(64*1024,length-total))
+                        longest_wait[0]=max(longest_wait[0],time.monotonic()-asked)
                         assert chunk, f'Truncated at {total}'
                         assert chunk==payload(swarm.prefix+offset+total,len(chunk)), f'Data mismatch at {offset+total}'
                         total+=len(chunk)
@@ -242,12 +273,17 @@ def main():
             assert not list(Path(tmp).iterdir()), 'Server wrote files in RAM-only mode'
             mark('no payload or session files written')
             if args.corrupt_first: assert swarm.corrupted; mark('corrupt piece rejected and recovered')
+            if args.stalling_peer:
+                assert swarm.stalled_requests, 'The stalling peer was never asked for a piece'
+                assert longest_wait[0]<15, f'A read waited {longest_wait[0]:.1f} s'
+                mark('pieces held by a peer that stopped sending go to another peer')
             assert samples and all(s['cache']['reserved_bytes']<=args.cache_mib*1048576 and s['cache']['allocated_bytes']<=args.cache_mib*1048576 for s in samples)
             mark('cache budget respected throughout')
             out={'passed':results,'cache_mib':args.cache_mib,'movie_mib':args.size_mib,'rate_limit_mbps':args.rate_mbps,
                 'transfer_seconds':round(elapsed,3),'effective_mbps':round(swarm.movie_size*8/elapsed/1e6,2),
                 'idle_rss_mib':round(idle['resident_bytes']/1048576,2),'peak_rss_mib':round(max(s['resident_bytes'] or 0 for s in samples)/1048576,2),
-                'rss_after_stop_mib':round(stopped_rss/1048576,2),
+                'rss_after_stop_mib':round(stopped_rss/1048576,2),'longest_read_wait_seconds':round(longest_wait[0],3),
+                'stalled_requests':swarm.stalled_requests,
                 'peak_reserved_mib':max(s['cache']['peak_reserved_bytes'] for s in samples)/1048576,
                 'evictions_before_stop':snapshot['cache']['evictions'],'samples':len(samples), 'payload_written_to_disk':False}
             report.write_text(json.dumps(out,indent=2)+'\n'); print(json.dumps(out,indent=2))

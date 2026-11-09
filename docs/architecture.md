@@ -45,8 +45,10 @@ The engine's local changes are listed in [vendor/UPSTREAM.md](../vendor/UPSTREAM
 - Only the windows that active HTTP readers request are downloaded. There's no background whole-file download.
 - Readers' windows and pieces being verified are protected from eviction. Eviction clears the engine's HAVE and per-file counters, so backward seeks download again correctly.
 - After a seek, obsolete requests are cancelled and late replies are discarded safely. Slots are reused after their writers finish. Reads and eviction coordinate through the same engine lock.
+- A piece readers want moves to the next peer that asks when its peer sent none of it for 5 s (it choked us or stopped), or has had it 10 times longer than the asking peer's average piece time (3 times when there's nothing new to download). The chunks already received stay. Peers often choke a client that doesn't upload, and without this one peer could hold back the piece a player is waiting for.
 - At most 20 connected or connecting peers by default, 16 outstanding block requests per peer, four metadata connections and 256 discovered peer candidates. Peers stay connected while the torrent is loaded, also between a player's requests, so a seek doesn't wait for reconnections.
 - Up to four simultaneous HTTP requests for one playback session, fewer when pieces are large. Each response has one 64 KiB queued chunk and a bounded producer buffer.
+- A response waits for a slow torrent and ends only after five minutes with no data, so the player decides how long to wait: ending it early sends TV apps back to their menu.
 - Stop cancels slow readers and unmaps the cache. An idle torrent is released after five minutes.
 
 The cache limit is **not a cap on total memory**. Torrent metadata, network buffers, DHT, TLS, runtime threads and the OS need memory too. The target for the whole server is under 192 MiB; confirm it with real swarms and on the router.

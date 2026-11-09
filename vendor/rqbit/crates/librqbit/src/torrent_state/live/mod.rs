@@ -91,7 +91,7 @@ use crate::{
     peer_connection::{
         PeerConnection, PeerConnectionHandler, PeerConnectionOptions, WriterRequest,
     },
-    piece_tracker::{AcquireRequest, AcquireResult, PieceTracker},
+    piece_tracker::{AcquireRequest, AcquireResult, PieceTracker, RamAcquired},
     session::CheckedIncomingConnection,
     session_stats::SessionStats,
     stream_connect::ConnectionKind,
@@ -1505,19 +1505,35 @@ impl PeerHandler {
                         .ram_wanted_pieces(&self.state.lengths, slots);
                     let acquired = pieces.acquire_ram_piece(
                         self.addr,
+                        self.counters.average_piece_download_time(),
                         &wanted,
                         &self.state.metadata.file_infos,
                         &*self.state.files,
                         |p| bf.get(p.get_usize()).map(|v| *v) == Some(true),
+                        |p| {
+                            self.state.per_piece_locks[p.get_usize()]
+                                .try_write()
+                                .is_some()
+                        },
                     );
-                    if let Some((piece, removed)) = acquired {
-                        self.state
-                            .stats
-                            .have_bytes
-                            .fetch_sub(removed, Ordering::Relaxed);
-                        return Ok(Some(piece));
-                    }
-                    return Ok(None);
+                    return Ok(match acquired {
+                        Some(RamAcquired::Reserved {
+                            piece,
+                            evicted_bytes,
+                        }) => {
+                            self.state
+                                .stats
+                                .have_bytes
+                                .fetch_sub(evicted_bytes, Ordering::Relaxed);
+                            Some(piece)
+                        }
+                        Some(RamAcquired::Stolen { piece, from_peer }) => {
+                            debug!("took over RAM piece {} from {}", piece, from_peer);
+                            steal_info = Some((from_peer, piece));
+                            Some(piece)
+                        }
+                        None => None,
+                    });
                 }
                 let result = pieces.acquire_piece(AcquireRequest {
                     peer: self.addr,
@@ -1779,15 +1795,19 @@ impl PeerHandler {
 
                 aframe!(self.wait_for_request_slot()).await;
 
-                if self.state.files.ram_cache_slots().is_some()
-                    && !self
-                        .state
-                        .lock_read("check RAM reservation")
-                        .get_pieces()?
+                if self.state.files.ram_cache_slots().is_some() {
+                    let g = self.state.lock_read("check RAM reservation");
+                    let pieces = g.get_pieces()?;
+                    if !pieces
                         .get_inflight(next)
                         .is_some_and(|p| p.peer == self.addr)
-                {
-                    break;
+                    {
+                        break;
+                    }
+                    // A piece taken over from another peer keeps the chunks it sent.
+                    if pieces.chunks().is_chunk_downloaded(&chunk) {
+                        continue;
+                    }
                 }
 
                 self.state

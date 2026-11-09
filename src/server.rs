@@ -734,7 +734,10 @@ async fn stream_file(
                 let read = tokio::select! {
                     _ = active.cancel.cancelled() => return Ok(()),
                     _ = tx.closed() => return Ok(()),
-                    r = tokio::time::timeout(Duration::from_secs(45),reader.read(&mut buffer)) => r.map_err(|_|std::io::Error::new(std::io::ErrorKind::TimedOut,"No torrent data for 45 seconds"))??,
+                    // The player decides how long to wait for a slow torrent. Ending the
+                    // response sends TV apps back to their menu, so give up only when the
+                    // torrent sent nothing for as long as an idle one is kept.
+                    r = tokio::time::timeout(Duration::from_secs(300),reader.read(&mut buffer)) => r.map_err(|_|std::io::Error::new(std::io::ErrorKind::TimedOut,"No torrent data for 5 minutes"))??,
                 };
                 if read==0 { return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,"Torrent stream ended early")); }
                 buffer.truncate(read); remaining-=read as u64; active.touched.store(now(),Ordering::Relaxed);
