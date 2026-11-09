@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+## 0.2.5 (2026-11-09)
+
 - Steadier playback from public torrents: peers that have the whole torrent no longer disconnect between a player's requests, and trackers now see the app as downloading, so they send it those peers too.
 - Lampa can play a torrent again after the app released it for sitting idle, or after Lampa dropped it.
 - Closed ways for web pages, and for other devices on the same network, to reach the app's controls.
