@@ -149,7 +149,7 @@ xcrun swift scripts/make-icon.swift
 
 ## Screenshots
 
-The README and the website show [`docs/images/screenshot-light.png`](images/screenshot-light.png) and [`screenshot-dark.png`](images/screenshot-dark.png). They're the real `ui/` files rendered in WebKit, like in the Mac app, with the sample data in `scripts/screenshots/mock.js`. After a visible change to the UI, render them again and copy them to the website:
+The README and the website show [`docs/images/screenshot-light.png`](images/screenshot-light.png) and [`screenshot-dark.png`](images/screenshot-dark.png). They're the real `ui/` files rendered in WebKit, like in the Mac app, with the sample data in `scripts/screenshots/mock.js`. After a visible change to the UI, render them again and copy them to the website's `torrstream-lite/` folder (see [Website](#website)):
 
 ```sh
 python3 scripts/screenshots/make.py
@@ -159,13 +159,11 @@ With Pillow installed (`pip install pillow`) they're reduced to 256 colors, abou
 
 ## Website
 
-The home page, privacy policy and support page are at <https://andeliseev.github.io/torrstream-lite/>. Their source is in the [unified-mail](https://github.com/andeliseev/unified-mail) repository, in `site/torrstream-lite/`, next to Unified Mail's pages: its `site/` folder is the whole of andeliseev.github.io. After changing them there, commit on its own (the message becomes public in the site's history) and publish from unified-mail:
+The home page, privacy policy and support page are at <https://andeliseev.github.io/torrstream-lite/>. They're in their own repository, [andeliseev/andeliseev.github.io](https://github.com/andeliseev/andeliseev.github.io), in `torrstream-lite/`, next to Unified Mail's pages, and GitHub Pages serves it. Clone it next to this one. Its README and CLAUDE.md say how to change and publish it: commit and push `main` (commit messages there are public).
 
-```sh
-git subtree push --prefix=site https://github.com/andeliseev/andeliseev.github.io.git main
-```
+If what the app connects to or keeps changes, update `torrstream-lite/privacy.html` there and its effective date.
 
-If what the app connects to or keeps changes, update `privacy.html` and its effective date.
+Until November 2026 the pages were in the unified-mail repository's `site/` folder and published from there with `git subtree`.
 
 ## Code formatting
 

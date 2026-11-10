@@ -24,6 +24,6 @@
 - Errors returned to the UI are shown as they are; write them for people.
 - Commits use the author set in this repo's git config. Never add `Co-Authored-By` lines or any other Claude/AI attribution to commit messages, pull requests or release notes.
 - `README.md` stays user-facing (download, first launch, use, privacy). Developer details go in `docs/`.
-- The website's pages live in the unified-mail repo, `site/torrstream-lite/` ([docs/development.md](docs/development.md#website)). After a visible UI change, render the screenshots again and copy them there; when what the app connects to or keeps changes, update its privacy policy.
+- The website's pages live in their own repository, [andeliseev.github.io](https://github.com/andeliseev/andeliseev.github.io), in `torrstream-lite/` ([docs/development.md](docs/development.md#website)). After a visible UI change, render the screenshots again and copy them there; when what the app connects to or keeps changes, update its privacy policy there.
 - When behavior changes, update the matching file in `docs/`. Add things you notice but don't do to `docs/todo.md`.
 - Every change people using the app would notice gets a line under **Unreleased** in [CHANGELOG.md](CHANGELOG.md), written for them (what changed for them, not how), in the same commit. The Release workflow turns those lines into the release's notes. Changes only to docs, tests or the release tooling don't go there.
