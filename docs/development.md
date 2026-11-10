@@ -17,7 +17,7 @@ sh scripts/build-macos.sh
 
 Open **`dist/TorrStream Lite.app`**. Quit and reopen the app after rebuilding, to load the new server. The build also updates the app's date and registers it with macOS, which keep Finder and the Dock from showing an old, cached icon. If the Dock still shows one, restart it with `killall Dock`. The files in `ui/` are compiled into the server, so rebuild after editing them too. The app is ad-hoc signed, not notarized. The window, the player and the video decoder use memory of their own, apart from the server memory the app shows.
 
-Packaging a DMG (`sh scripts/package-macos.sh`, into `release-assets/`) and the Keenetic build ([router.md](router.md)) are separate steps.
+Packaging a DMG (`sh scripts/package-macos.sh`, into `release-assets/`) and the Keenetic build and its archive ([router.md](router.md#build-it-yourself)) are separate steps.
 
 To run only the server, for example to work on the control page in a browser:
 
@@ -58,7 +58,10 @@ python3 tests/e2e.py --cache-mib 16 --size-mib 48 --peers 12 --peer-mbps 10 --re
 python3 tests/e2e.py --cache-mib 96 --size-mib 256 --rate-mbps 80 --report test-results/router-profile.json
 python3 tests/lampa.py
 python3 tests/network.py
+python3 tests/smoke.py
 ```
+
+`tests/smoke.py` is the short run the release gives the Keenetic binary on an emulated router processor (`--runner`, see [Releases](#releases-github-actions)); without options it runs the Mac's own build. Its `--https-url` adds the one request in these tests that leaves the machine: it fetches that address as a torrent URL, to see the root certificates accept a real site.
 
 To try a real 4K video, generate one with FFmpeg and offer it to the app through a local peer:
 
@@ -85,9 +88,11 @@ The local peer speaks the real BitTorrent protocol and never contacts public swa
 - A magnet link whose details never come, because its only peer is gone, its tracker returns no peers, or its tracker no longer has the torrent: the window's status counts the peers found and failed, then says why the torrent didn't load, with the tracker's own reason; and before the details come, the tracker isn't told that nothing is left to download
 - Lampa's sequence: ping, form-labelled JSON from Lampa's web origin, adding by torrent URL, file selection, delayed preload progress, cache statistics, playback and seeking, watched positions and teardown; and that Lampa can't change TV access and other browser origins are refused
 - Requests addressed to unknown host names (DNS rebinding) are refused, and a cross-site stream URL can't add a torrent
+- Connections (unit tests): one that sends no request, or half of one, is closed when its time is up, and so is one left idle after a response, while one that keeps sending requests stays open and a response that pauses for longer goes on; connections over a listener's limit wait for a free place; stopping the server lets a response finish; a connection that ends with data its client hasn't read keeps its socket and its place until the client has, and gives them up when the server stops
+- The smoke run: the server starts with no root certificates on the system (on Linux, where it then uses its built-in list), refuses a torrent URL whose HTTPS certificate no authority signed, streams a torrent through a cache smaller than the file, ends cleanly on SIGTERM, and starts and streams again with `--ipv4-only`, as on a system without IPv6
 - Decoding a generated 3840×2160 H.264 clip through the Mac server: all 288 frame hashes and a seek match the original
 
-Machine-readable results go to `test-results/` (not committed). The native window, a physical TV and the router still need manual checks.
+Machine-readable results go to `test-results/` (not committed). The native window, a physical TV and the router still need manual checks; the router's are in [router.md](router.md#first-run-checklist), with `tests/watch.py` to record a run from the Mac.
 
 ### Measurements
 
@@ -101,7 +106,20 @@ On an Apple Silicon Mac, November 8, 2026, with the local peer:
 | Generated 4K clip through the bundled server | 288 matching decoded frames; the seek matched |
 | Control page: add a torrent, then Stop | Server memory from 98 to 16 MiB |
 
-These aren't router benchmarks or a guarantee for Internet swarms, and there's no measured comparison with TorrServer yet.
+These are a Mac's figures with local test peers, not a guarantee for Internet swarms, and there's no measured comparison with TorrServer yet.
+
+On a router there is one run so far, recorded with `tests/watch.py` on 2026-11-11: a Keenetic Ultra (KN-1811: MediaTek MT7622B, two Cortex-A53 cores at 1.35 GHz, 512 MB RAM, kernel 4.9-ndm-5) with a build of the sources after 0.2.9, the default 96 MiB cache and 20 peers. It played a 4K film (21 GB, HEVC) from an Internet swarm to Lampa on a TV for 13 minutes, with four seeks:
+
+| Reading | Result |
+| --- | --- |
+| Server memory, idle | 6.4 MiB |
+| Server memory, playing | 112.5 MiB at its peak |
+| Server memory after the film was closed in Lampa | 14.6 MiB; cache released within five seconds |
+| Download while playing | 30 Mbps on average, 24 between the seeks, and up to 181 Mbps right after a seek |
+| Processor while playing | 9% of one core on average, 37% at the fastest download |
+| Peers | 10 to 15 |
+
+Every status reading was answered while the server ran (also after the router was restarted, where the start script brought it back within a minute), the server logged nothing but its three starting lines, and by the viewer's account the film played and seeked without trouble; nobody timed the seeks. That router had root certificates and IPv6 of its own, so the built-in certificate list and the IPv4-only mode weren't used. Not measured yet: the router's own free memory and load while it plays, and a long run next to the home's other traffic.
 
 ## Third-party notices
 
@@ -130,8 +148,8 @@ The Release workflow runs `python3 scripts/notices.py --check`, which fails when
 | `src/` | Rust server: HTTP API, RAM cache, TV access |
 | `ui/` | Control page; compiled into the server |
 | `macos/` | Native Mac window and `Info.plist` |
-| `scripts/` | Mac build and DMG, Keenetic build, Rust toolchain helper, release helper, app icon, screenshots |
-| `tests/` | Local torrent peer, streaming, memory, network, Lampa and release tests |
+| `scripts/` | Mac build and DMG, Keenetic build, archive and start script (`router/`), Rust toolchain helper, release helper, app icon, screenshots |
+| `tests/` | Local torrent peer, streaming, memory, network, Lampa, smoke and release tests, and `watch.py`, which records a running server's speed, memory and processor load |
 | `vendor/` | The pinned librqbit engine with local changes ([UPSTREAM.md](../vendor/UPSTREAM.md)) |
 | `licenses/` | License texts that crates don't ship themselves, for the [third-party notices](#third-party-notices) |
 | `docs/` | These notes |
@@ -198,14 +216,14 @@ It prints the last release and the next version. The last release is the highest
 
 The workflow then:
 
-1. **Tests:** formatting, Clippy, unit tests, the release helper and peer speed tests, the [third-party notices](#third-party-notices) and the engine's own tests, then the streaming, Lampa and TV access tests against a local peer, on Linux. If anything fails, nothing is committed or built.
+1. **Tests:** formatting, Clippy, unit tests, the release helper and peer speed tests, the [third-party notices](#third-party-notices) and the engine's own tests, then the streaming, Lampa, TV access and smoke tests against a local peer, on Linux. If anything fails, nothing is committed or built.
 2. Works out the version with `scripts/release.py next`. It stops if that isn't newer than the last release, or is lower than the version already in `Cargo.toml`.
 3. Sets it in `Cargo.toml`, `Cargo.lock` and `macos/Info.plist` (`scripts/release.py set`). Each job does this in its own checkout; nothing is committed yet.
 4. Moves the **Unreleased** lines of [`CHANGELOG.md`](../CHANGELOG.md) under `## X.Y.Z (date)` (`scripts/release.py changelog`), leaving an empty Unreleased section for the next changes. With nothing under Unreleased, the run shows a warning and the release has no "What's new".
 5. Creates a draft release `vX.Y.Z` whose text starts with **What's new** (those changelog lines), replacing a draft left by a failed run.
 6. Builds the chosen platforms in parallel, with the new version, and uploads them to the draft, each with a `.sha256` file:
    - **macOS:** builds the app on an Apple Silicon runner, verifies its signature, runs the Lampa test against the server inside the app, and packages `TorrStream-Lite-X.Y.Z-macos-arm64.dmg`.
-   - **Keenetic:** cross-compiles a static ARM64 Linux binary with `cargo-zigbuild`, checks that it's static ARM64, and packs `TorrStream-Lite-X.Y.Z-linux-arm64.tar.gz` with `LICENSE` and `THIRD_PARTY_NOTICES.txt`.
+   - **Keenetic:** cross-compiles a static ARM64 Linux binary with `cargo-zigbuild` and checks that it's static ARM64. The build machine can't run it, so QEMU does, as a Cortex-A53, the processor of ARM64 routers (`qemu-aarch64 -cpu cortex-a53`): `tests/smoke.py` checks that it prints its version, starts without the system's root certificates, answers `/api/status`, streams from a local peer, also with IPv4 only, and accepts GitHub's HTTPS certificate with its built-in list. QEMU runs the program on the build machine's kernel, so this says nothing about a router's kernel or speed. Then `scripts/package-router.sh` packs `TorrStream-Lite-X.Y.Z-linux-arm64.tar.gz`: the binary, the start script, `LICENSE` and `THIRD_PARTY_NOTICES.txt`.
 7. Only if every build succeeded: commits the version and changelog changes as "Release vX.Y.Z" to `main`, authored by whoever ran the workflow (with their GitHub noreply address, so no bot appears among the contributors), and publishes the release with its `vX.Y.Z` tag on that commit. Run `git pull` afterwards, before you commit locally.
 
 **If a run fails,** fix the cause and run it again with the same choice. A failed test or build leaves `main` as it was, and the tag doesn't exist yet, so the same version comes out and its draft is replaced. If something was pushed to `main` while the release ran, the last step stops rather than release a commit that wasn't built; run it again. If the release commit was pushed but the release wasn't published, the next run reuses that commit and the changelog's notes.

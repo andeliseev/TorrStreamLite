@@ -532,6 +532,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(
         json!({"server":"TorrStream Lite", "version":env!("CARGO_PKG_VERSION"), "mode":"RAM only",
         "memory_bytes":crate::memory::memory_bytes(), "resident_bytes":crate::memory::resident_bytes(),
+        "peak_resident_bytes":crate::memory::peak_resident_bytes(),
+        "cpu_seconds":crate::memory::cpu_seconds().map(|seconds| (seconds * 1000.0).round() / 1000.0),
         "cache":state.factory.snapshot(), "cache_setting_mib":state.factory.budget() >> 20, "peer_limit":state.config.peers, "uptime_seconds":state.started.elapsed().as_secs(),
         "torrent":active, "resolving":state.operation.try_lock().is_err(),
         "lookup":state.lookup.lock().as_ref().map(lookup_json), "add_error":state.add_error.lock().clone()}),

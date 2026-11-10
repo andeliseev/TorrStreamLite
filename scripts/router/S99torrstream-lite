@@ -1,0 +1,132 @@
+#!/bin/sh
+# TorrStream Lite on a router with Entware. Install it as
+# /opt/etc/init.d/S99torrstream-lite and make it executable (docs/router.md).
+# Entware runs it with "start" when the router boots and with "stop" when it shuts down.
+# By hand: /opt/etc/init.d/S99torrstream-lite start | stop | restart | status
+
+# The router's own address in the home network, and the port Lampa connects to.
+# 8090 is the port TorrServer apps expect.
+LISTEN=192.168.1.1:8090
+# RAM for the video cache, in MiB (4 to 256).
+CACHE_MIB=96
+# The most peers to connect to (1 to 64).
+PEERS=20
+# More options, for example EXTRA="--allow-host my.keenetic.net"
+EXTRA=""
+
+NAME=torrstream-lite
+BIN=/opt/bin/$NAME
+PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# The server's process IDs; nothing when it isn't running. /proc/<id>/stat starts with
+# the ID, the program's name in brackets and its state. The kernel keeps the first 15
+# characters of a name, which is all of this one. State Z is a process that has ended
+# and waits to be collected: a server that stopped at once is one until this shell
+# collects it, and must not count as running.
+pids() {
+    for dir in /proc/[0-9]*; do
+        name=
+        state=
+        [ -r "$dir/stat" ] && read -r id name state rest 2>/dev/null <"$dir/stat"
+        [ "$name" = "($NAME)" ] && [ "$state" != Z ] && echo "${dir#/proc/}"
+    done
+    return 0
+}
+
+launch() {
+    # Without color codes in the log lines.
+    NO_COLOR=1
+    export NO_COLOR
+    # Started from an SSH session, it must outlive that session.
+    trap '' HUP
+    # Nothing of the server's may stay attached to whatever started this script: the
+    # router waits for a boot script's output to end.
+    if command -v logger >/dev/null 2>&1; then
+        # To the router's system log.
+        "$BIN" --listen "$LISTEN" --cache-mib "$CACHE_MIB" --peers "$PEERS" $EXTRA \
+            </dev/null 2>&1 | logger -t "$NAME" >/dev/null 2>&1 &
+    else
+        "$BIN" --listen "$LISTEN" --cache-mib "$CACHE_MIB" --peers "$PEERS" $EXTRA \
+            </dev/null >/dev/null 2>&1 &
+    fi
+}
+
+start_server() {
+    if [ -n "$(pids)" ]; then
+        echo "$NAME is already running"
+        return 0
+    fi
+    if [ ! -x "$BIN" ]; then
+        echo "$BIN is missing or not executable" >&2
+        return 1
+    fi
+    # It listens at once, or stops and says why. While the router boots, the home
+    # network's address may not be there yet, so try a few times.
+    for attempt in 1 2 3 4 5; do
+        launch
+        sleep 2
+        if [ -n "$(pids)" ]; then
+            echo "$NAME started: http://$LISTEN"
+            return 0
+        fi
+        sleep 3
+    done
+    echo "$NAME did not start. The reason is in the router's system log, or run it by hand:" >&2
+    echo "  $BIN --listen $LISTEN --cache-mib $CACHE_MIB --peers $PEERS $EXTRA" >&2
+    return 1
+}
+
+stop_server() {
+    if [ -z "$(pids)" ]; then
+        echo "$NAME is not running"
+        return 0
+    fi
+    kill $(pids) 2>/dev/null
+    for second in 1 2 3 4 5 6 7 8 9 10; do
+        [ -z "$(pids)" ] && break
+        sleep 1
+    done
+    if [ -n "$(pids)" ]; then
+        # A player that doesn't let go of its stream can hold the server up.
+        kill -9 $(pids) 2>/dev/null
+        sleep 1
+    fi
+    if [ -n "$(pids)" ]; then
+        echo "$NAME could not be stopped" >&2
+        return 1
+    fi
+    echo "$NAME stopped"
+}
+
+show_status() {
+    running=$(pids)
+    if [ -z "$running" ]; then
+        echo "$NAME is not running"
+        return 1
+    fi
+    for pid in $running; do
+        echo "$NAME is running, process $pid"
+        # VmRSS is the memory it uses now, VmHWM the most it has used since it started.
+        grep -E '^(VmRSS|VmHWM):' "/proc/$pid/status"
+    done
+}
+
+case "$1" in
+    start)
+        start_server
+        ;;
+    stop | kill)
+        stop_server
+        ;;
+    restart)
+        stop_server && start_server
+        ;;
+    status | check)
+        show_status
+        ;;
+    *)
+        echo "Usage: $0 start | stop | restart | status" >&2
+        false
+        ;;
+esac

@@ -4,6 +4,12 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+- Keenetic build: it now starts on a router that has no root certificates installed. There it checks HTTPS torrent links and trackers against a list built into it (Mozilla's); before, it didn't start on such a router. A router that has certificates keeps using its own.
+- Keenetic build: it also starts on a router without IPv6, which on a Keenetic is a component that may not be installed. It then uses IPv4 only.
+- Keenetic build: the download now includes a script that starts the server when the router boots, and stops, restarts and reports on it.
+- Keenetic build: it has now run on a real router, a Keenetic Ultra (KN-1811), and played a 4K film there. The guide (`docs/router.md`) was rewritten after that install. It now covers adding Entware to the router, installing and trying the server, checking that it works, switching it off, updating, uninstalling, and what to do when something fails, and says which of its steps haven't been tried on a router yet.
+- Connections that sit idle, or never send a request, are closed after 30 seconds, and each address serves at most 64 at once. A TV that was switched off, or a device that misbehaves, can no longer leave connections open for good. Players and TV apps aren't affected: a paused film waits as long as before.
+
 ## 0.2.9 (2026-11-09)
 
 - Magnet links load faster, and some that timed out now load: the app asks 16 peers for a torrent's details at once instead of 4. Most peers in a swarm never answer, and waiting for them four at a time could use up all the time allowed.

@@ -6,6 +6,7 @@ Stream torrents to your Mac or your TV without saving anything to disk. TorrStre
 - **Light on memory, nothing on disk:** the video goes through a 96 MiB cache, whatever the size of the torrent
 - **Seek anywhere:** only the parts you watch are downloaded
 - **Watch on your TV** with Lampa or another app made for [TorrServer](https://github.com/YouROK/TorrServer). TorrStream Lite answers them like TorrServer does, on the same port
+- **Or without a Mac:** an experimental build runs [on a Keenetic router](#on-a-keenetic-router) and serves the TV by itself
 - **See the download** as it happens: speed, cache use and every connected peer
 - Light and dark appearance
 
@@ -25,7 +26,7 @@ Get the latest version from the **[Releases page](https://github.com/andeliseev/
 | macOS 12 or later, Apple Silicon | `TorrStream-Lite-<version>-macos-arm64.dmg` |
 | Keenetic router (ARM64 with Entware), experimental | `TorrStream-Lite-<version>-linux-arm64.tar.gz` |
 
-Each file has a `.sha256` checksum next to it.
+Each file has a `.sha256` checksum next to it. Not every release has the router's file: take it from the newest release that lists it. The Mac's steps are below; the router's are in [On a Keenetic router](#on-a-keenetic-router).
 
 ### First launch
 
@@ -65,6 +66,44 @@ If macOS asks whether TorrStream Lite may find devices on your local network, cl
 
 The address uses port 8090, like TorrServer. If TorrServer itself runs on the same Mac, choose another port in **Settings**.
 
+## On a Keenetic router
+
+The server also runs on a Keenetic router by itself, so the TV plays through Lampa with no Mac switched on. This is experimental: it has run on one model so far, a Keenetic Ultra (KN-1811), where a 4K film took about 112 MiB of the router's memory and a tenth of one processor core.
+
+It needs a Keenetic with an ARM64 processor (many models have MIPS processors and can't run it) and Entware, the package system Keenetic supports for extra programs. In short:
+
+1. Add Entware to the router. Keenetic's component for it updates the router's system and restarts it.
+2. Copy the server, one file of about 10 MB, to the router over SSH, and start it by hand to see that it works.
+3. Copy its start script, so that it starts whenever the router boots.
+4. In Lampa, open **Settings → TorrServer** and enter the router's address, such as `192.168.1.1:8090`.
+
+**[The router guide](docs/router.md)** has every step with its commands: [installing](docs/router.md#install), [checking that it works](docs/router.md#check-that-it-works), [switching it off and on](docs/router.md#switch-it-off-and-on), [updating](docs/router.md#update), [uninstalling](docs/router.md#uninstall), and [what to do when something fails](docs/router.md#if-it-doesnt-work). It also says [what the install changes on the router](docs/router.md#what-it-changes-on-the-router): two files in Entware, and nothing in the router's own system.
+
+The page at the router's address, such as `http://192.168.1.1:8090`, is the Mac app's window without its Mac-only settings, for any computer or phone in the home network. There's no password, so anything in the home network can add, play and stop torrents; nothing is reachable from the Internet.
+
+## If something doesn't work
+
+| What you see | What to do |
+| --- | --- |
+| macOS says it can't verify the app | Follow [First launch](#first-launch) |
+| **Play** says to install VLC or IINA | Install one of them, or click the copy button next to the file and open that address in your player |
+| A magnet link doesn't load | The window says what it found: how many peers, how many of them answered, and what the torrent's tracker said. If the tracker no longer has the torrent, or no peer answers, look for another release of it |
+| The TV app can't connect | **Allow other devices** must be on, and the address in the TV app the one the sidebar shows. The Mac must be awake and in the same network as the TV, and macOS must allow the app to find devices on the local network (**System Settings → Privacy & Security → Local Network**) |
+| **Home network** says it cannot open the address | Something else on the Mac uses port 8090, such as TorrServer. Choose another port in **Settings**, and enter the same in the TV app |
+| Something on the router | See [If it doesn't work](docs/router.md#if-it-doesnt-work) in the router guide |
+
+For anything else, [open an issue](https://github.com/andeliseev/TorrStreamLite/issues).
+
+## Uninstalling
+
+**On a Mac:** quit TorrStream Lite and move it from **Applications** to the Trash. It leaves nothing on the disk but its settings, and this command in Terminal removes those:
+
+```sh
+defaults delete com.andeliseev.torrstream-lite
+```
+
+**On a router:** stop the server and delete its two files, as [Uninstall](docs/router.md#uninstall) in the router guide shows. That section also removes Entware, if you added it only for this.
+
 ## Memory
 
 TorrStream Lite started as a streaming server small enough to run on a home router, and the Mac app keeps that design:
@@ -72,17 +111,18 @@ TorrStream Lite started as a streaming server small enough to run on a home rout
 - **One cache, always the same size.** The video goes through a single block of RAM, 96 MiB unless you choose 192 or 256 MiB in **Settings → Cache**, whether the torrent is 1 GB or 100 GB. It's taken when you add a torrent and given back when you stop it, quit, or after five minutes with nothing playing.
 - **More cache, if you like.** A bigger cache keeps more of the video around where you're watching: smoother playback on slow torrents and quicker seeks back. A change applies to the next torrent you add.
 - **Only what you watch.** The app downloads the part your player asks for and a little ahead of it, never the whole file. Seeking back further than the cache holds downloads that part again.
-- **Measured:** in our tests the whole server used about 110 MiB while streaming and about 15 MiB after Stop. The window and your video player use memory of their own.
+- **Measured:** in our tests the whole server used about 110 MiB while streaming and about 15 MiB after Stop. The window and your video player use memory of their own. On a Keenetic router it used 112 MiB with a 4K film and 6 MiB before one was added.
 - **No disk at all:** no video files, no cache files, no history.
 
 ## Privacy
 
-TorrStream Lite runs on your computer. It has no account, no analytics and no servers of its own.
+TorrStream Lite runs on your computer, or on your router if you install it there. It has no account, no analytics and no servers of its own.
 
 - **Torrent traffic:** like any torrent app, it connects to the trackers and peers of the torrent you add, and to the DHT network that helps find peers. They see your IP address.
 - **Torrent URLs:** when you add a torrent by its URL, the app downloads the .torrent file from that address.
 - **Nothing is kept:** the video is released when you stop the torrent or quit. Watched positions from TV apps last only until the torrent is stopped. When nothing has played for five minutes, or a TV app drops the torrent, the app keeps only its link in memory, so the TV app can play it again; Stop, another torrent or quitting forgets it.
 - **Settings:** the Mac app saves only the home network switch and port, the cache size, the appearance, and the window's size and position.
+- **On a router:** the server saves nothing. Its start script hands what it prints to the router's system log, and a warning there can name a torrent's hash and the addresses of peers. It runs all the time, so it's part of the DHT network all the time, also with no torrent loaded.
 
 Read the full [privacy policy](https://andeliseev.github.io/torrstream-lite/privacy.html).
 
@@ -94,7 +134,7 @@ Read the full [privacy policy](https://andeliseev.github.io/torrstream-lite/priv
 - **Search for torrents.** Bring a magnet link or a .torrent file, or search in Lampa.
 - **Work as a DLNA media server.** A TV's own media player can't browse it; use Lampa, another TorrServer app, or a player with the stream address.
 - **Play a few rare torrents:** ones whose pieces don't fit three times in the cache (larger than 32 MiB with the default 96 MiB cache, 64 MiB with a bigger one), and ones made only in the newer BitTorrent v2 format. Hybrid v1 and v2 torrents play.
-- **Run on Intel Macs.** The Keenetic router build hasn't been tested on a router yet.
+- **Run on Intel Macs,** or on Keenetic routers with MIPS processors. The router build has run on one model so far, a Keenetic Ultra (KN-1811).
 
 ## Building from source and contributing
 

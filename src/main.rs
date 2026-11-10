@@ -2,7 +2,9 @@ mod cache;
 mod memory;
 mod network;
 mod range;
+mod serve;
 mod server;
+mod tls;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -46,6 +48,9 @@ pub struct Config {
     /// outlives it, even after a crash or Force Quit.
     #[arg(long)]
     exit_on_stdin_close: bool,
+    /// Use IPv4 only. A system without IPv6 gets this by itself.
+    #[arg(long)]
+    ipv4_only: bool,
 }
 
 fn main() -> Result<()> {
@@ -70,6 +75,12 @@ async fn run(config: Config) -> Result<()> {
         "--idle-seconds must be 0 or at least 10"
     );
     let factory = cache::RamFactory::new(config.cache_mib as usize * 1024 * 1024);
+    // The engine's sockets take IPv4 and IPv6 together, and a system without IPv6 can't
+    // open them: the session wouldn't start.
+    let ipv4_only = config.ipv4_only || !network::ipv6_available();
+    if ipv4_only && !config.ipv4_only {
+        tracing::info!("This system has no IPv6, so the server uses IPv4 only");
+    }
     let session = Session::new_with_opts(
         "__ram_only__".into(),
         SessionOptions {
@@ -89,6 +100,7 @@ async fn run(config: Config) -> Result<()> {
             runtime_worker_threads: Some(8),
             disable_upload: true,
             disable_local_service_discovery: true,
+            ipv4_only,
             connect: Some(ConnectionOptions {
                 peer_opts: Some(PeerConnectionOptions {
                     connect_timeout: Some(Duration::from_secs(5)),
@@ -99,6 +111,8 @@ async fn run(config: Config) -> Result<()> {
                 ..Default::default()
             }),
             client_name_and_version: Some(format!("TorrStreamLite/{}", env!("CARGO_PKG_VERSION"))),
+            // HTTPS trackers, on a router without a certificate store too.
+            http_client_builder: Some(tls::client_builder),
             ..Default::default()
         },
     )
@@ -115,7 +129,7 @@ async fn run(config: Config) -> Result<()> {
         started: std::time::Instant::now(),
         tv: Mutex::new(network::TvAccess::new(config.tv_port)),
         resume: Default::default(),
-        client: reqwest::Client::builder()
+        client: tls::client_builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .build()?,
@@ -147,11 +161,8 @@ async fn run(config: Config) -> Result<()> {
             std::process::exit(0);
         });
     }
-    axum::serve(
-        listener,
-        server::router(state.clone(), lan).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
+    let app = server::router(state.clone(), lan);
+    serve::serve(listener, app, serve::Limits::default(), async move {
         let signal = async {
             #[cfg(unix)]
             {
@@ -172,7 +183,7 @@ async fn run(config: Config) -> Result<()> {
             active.cancel.cancel();
         }
     })
-    .await?;
+    .await;
     idle.abort();
     network_watch.abort();
     session.stop().await;

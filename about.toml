@@ -9,6 +9,9 @@ ignore-dev-dependencies = true
 # The licenses we accept, most preferred first: a crate that offers several is listed
 # under the first one here. A crate under any other license stops the build of the notices.
 # BSL-1.0 comes before Apache-2.0 for ryu, whose Apache file the scanner reads as "Pixar".
+# CDLA-Permissive-2.0 is a license for data: Mozilla's root certificates in
+# webpki-root-certs, which only the Keenetic build includes. It asks that its text go
+# along with the data.
 accepted = [
     "MIT",
     "BSL-1.0",
@@ -18,6 +21,7 @@ accepted = [
     "Unicode-3.0",
     "Apache-2.0",
     "MPL-2.0",
+    "CDLA-Permissive-2.0",
 ]
 
 # Crates whose own license files the scanner misreads. Each checksum is the SHA-256 of

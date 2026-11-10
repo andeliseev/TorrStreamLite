@@ -27,13 +27,15 @@ flowchart LR
 | Module | Responsibility |
 | --- | --- |
 | `main.rs` | Command-line options, the engine session (upload off, DHT without persistence, connection limits), server start and graceful shutdown |
+| `serve.rs` | Serves the routes on a listener, in place of `axum::serve`: the time a connection gets to send a request, how many connections a listener serves at once, and keeping a socket until its client has read what was sent |
 | `server.rs` | Routes and browser-origin checks, adding and stopping the one active torrent, range streaming, preload, the TorrServer-compatible routes, releasing an idle torrent |
 | `cache.rs` | `RamFactory` and `RamStorage`: one anonymous memory mapping split into piece slots, reserved before network requests, least-recently-used eviction |
 | `network.rs` | TV access (in the app: **Home network → Allow other devices**): finds the Mac's private LAN addresses and runs one listener per address on the TV port, checked again every 3 s |
 | `range.rs` | Parses a single HTTP byte range |
-| `memory.rs` | The server's memory for the app: the physical footprint on macOS, as Activity Monitor shows it, and the resident size |
+| `memory.rs` | The server's memory for the app: the physical footprint on macOS, as Activity Monitor shows it, and the resident size. And for measuring a run from outside: its peak, and the processor time used |
+| `tls.rs` | Root certificates for HTTPS torrent URLs and trackers: the system's, or on Linux, when the system has none, the built-in list |
 
-Options: `--listen` (default `127.0.0.1:8090`; the Mac app passes port 0), `--cache-mib` (96; Settings → Cache changes it for the next torrent, see `POST /api/cache`), `--peers` (20), `--idle-seconds` (300, 0 turns it off), `--tv-port` (8090, the port TorrServer apps expect), `--allow-origin` and `--allow-host` (both repeatable, see [Security](#security)), `--no-dht`, and `--exit-on-stdin-close` (the Mac app's: exit when standard input closes). The server prints `TORRSTREAM_LISTEN=http://…` once it listens; the Mac app reads that line.
+Options: `--listen` (default `127.0.0.1:8090`; the Mac app passes port 0), `--cache-mib` (96; Settings → Cache changes it for the next torrent, see `POST /api/cache`), `--peers` (20), `--idle-seconds` (300, 0 turns it off), `--tv-port` (8090, the port TorrServer apps expect), `--allow-origin` and `--allow-host` (both repeatable, see [Security](#security)), `--no-dht`, `--ipv4-only` (a system that can't open an IPv6 socket gets it by itself: the engine's sockets otherwise take both protocols, and the session wouldn't start), and `--exit-on-stdin-close` (the Mac app's: exit when standard input closes). The server prints `TORRSTREAM_LISTEN=http://…` once it listens; the Mac app reads that line.
 
 The engine's local changes are listed in [vendor/UPSTREAM.md](../vendor/UPSTREAM.md). They only apply when the storage is the RAM cache.
 
@@ -49,6 +51,7 @@ The engine's local changes are listed in [vendor/UPSTREAM.md](../vendor/UPSTREAM
 - At most 20 connected or connecting peers by default, 16 outstanding block requests per peer, 256 discovered peer candidates, and for a magnet link's details 16 connections at a time, of which four may be receiving them (up to 2 MiB each); most peers a tracker or the DHT gives never answer, and each takes seconds to fail. Peers stay connected while the torrent is loaded, also between a player's requests, so a seek doesn't wait for reconnections: RAM storage selects no files, so the engine must never treat it as finished, and it tells trackers the torrent's size less what's cached as what's left, so they don't take it for a seeder (many send seeders no other seeders). Before a magnet link's details arrive the size isn't known, and trackers hear 16 KiB left, as from libtorrent.
 - Once a reader's window is cached, or the player pauses, peers have nothing to send, and seeders send a keep-alive only every couple of minutes. The 15 s read timeout applies only while a peer owes us chunks; one that has sent its bitfield, has unchoked us and owes nothing may stay quiet (one that keeps us choked still goes, so it doesn't hold a peer slot). Before, every seeder was dropped this way, and the reconnect backoff (10 s, then a minute, then six) left a seek with no one to download from. Our keep-alives go out every 5 s, so peers don't drop us either.
 - Up to four simultaneous HTTP requests for one playback session, fewer when pieces are large. Each response has one 64 KiB queued chunk and a bounded producer buffer.
+- Each listener serves at most 64 connections at once; more wait in the system's queue. A connection that's idle, or hasn't finished sending a request's headers, is closed after 30 s, so the connections of devices that went away don't pile up.
 - A response starts at the requested position (a stream created at 0 and then moved would first ask peers for the start of the file) and waits for a slow torrent, ending only after five minutes with no data, so the player decides how long to wait: ending it early sends TV apps back to their menu. A preload waits as long, and playback clears it.
 - Stop cancels slow readers and unmaps the cache. An idle torrent is released after five minutes.
 
@@ -62,7 +65,7 @@ Native API, used by the control page:
 
 | Request | Behavior |
 | --- | --- |
-| `GET /api/status` | Memory (`memory_bytes`, the footprint on macOS, and `resident_bytes`), cache accounting and the torrent's progress, without its files |
+| `GET /api/status` | Memory (`memory_bytes`, the footprint on macOS, and `resident_bytes`), cache accounting and the torrent's progress, without its files. For measuring a run: `peak_resident_bytes`, the most memory resident since the server started, and `cpu_seconds`, the processor time it has used |
 | `GET /api/files` | The torrent's files; the page reads them once per torrent |
 | `GET /api/peers` | Connected peers' counters, the torrent session ID and a monotonic sample time; no stored history |
 | `GET /api/network` | TV access: addresses, port, and whether the caller may change it |
@@ -92,6 +95,8 @@ Lampa's jQuery requests carry JSON but can label it as form data. The compatibil
 - Approved preflights get the private-network header; browser and OS permission prompts still apply.
 - `POST /api/network`, which turns TV access on or off, accepts loopback connections only.
 - TV access listens only on private IPv4 addresses, skipping loopback, VPN, tunnel, container, Internet Sharing and virtual machine interfaces. By design it has no password.
+- **Connections.** A client has 30 s to send a request's headers, counted from the connection's start or from the end of the response before, so an idle connection is closed too; clients open a new one for their next request. A listener serves 64 connections at once, and the TV access listeners and the loopback server each have their own 64, so devices in the home network can't use up the window's. A response in progress has no time limit, because a paused player may wait for hours, and neither has a request's body (2 MiB at most). A response is finished for the server once its last byte is in the system's buffer, which can be long before a paused player reads it, and the system throws away what a closed socket couldn't deliver within a few minutes. So a connection that ends while its client hasn't taken everything keeps its socket, and its place among the 64, until the client has, has closed, or the server stops; it only says that no more requests are answered there.
+- **Outgoing HTTPS.** Torrent URLs and trackers are checked against the system's root certificates: the Keychain on macOS, and on Linux the files OpenSSL uses (`SSL_CERT_FILE`, `SSL_CERT_DIR`, or the usual places). A router may have none, and the server then didn't start; so on Linux, when the system has no root certificates, it uses Mozilla's list from the `webpki-root-certs` crate, built into the binary, and logs that. The Mac app doesn't include that list.
 - The Mac app lets the page navigate only to the server's own origin, opens only the server's own stream addresses in a player, opens external links only from a fixed list of GitHub pages, and accepts native messages only from its own main frame (see [ui.md](ui.md#the-mac-window)). It starts the server with `--exit-on-stdin-close` and a pipe, so the server exits with the app even after a crash or Force Quit.
 
 ## Design decisions

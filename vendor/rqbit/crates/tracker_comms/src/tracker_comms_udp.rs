@@ -265,11 +265,19 @@ impl Drop for TransactionIdGuard<'_> {
 }
 
 impl UdpTrackerClient {
+    /// `ipv4_only`: open an IPv4 socket, not the one for both protocols, which a system
+    /// without IPv6 can't open.
     pub async fn new(
         cancel_token: CancellationToken,
         bind_device: Option<&BindDevice>,
+        ipv4_only: bool,
     ) -> anyhow::Result<Self> {
-        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+        let ip = if ipv4_only {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        };
+        let addr = SocketAddr::new(ip, 0);
         let sock = UdpSocket::bind_udp(
             addr,
             librqbit_dualstack_sockets::BindOpts {

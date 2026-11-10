@@ -53,6 +53,12 @@ fn suitable_interface(name: &str, flags: u32, ip: Ipv4Addr) -> bool {
         .any(|prefix| name.starts_with(prefix))
 }
 
+/// Whether this system can open an IPv6 socket at all. A router's kernel may have no
+/// IPv6: on a Keenetic it's a component to install.
+pub fn ipv6_available() -> bool {
+    std::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).is_ok()
+}
+
 pub fn lan_addresses() -> Vec<LanAddress> {
     let mut result = Vec::new();
     // getifaddrs owns this list until freeifaddrs; all strings and addresses
@@ -146,17 +152,13 @@ impl TvAccess {
                     let shutdown = cancel.clone();
                     let app = server::router(state.clone(), true)
                         .layer(middleware::from_fn_with_state(cancel.clone(), tv_response));
-                    let task = tokio::spawn(async move {
-                        if let Err(error) = axum::serve(
-                            listener,
-                            app.into_make_service_with_connect_info::<SocketAddr>(),
-                        )
-                        .with_graceful_shutdown(shutdown.cancelled_owned())
-                        .await
-                        {
-                            tracing::warn!(%socket, %error, "TV listener stopped");
-                        }
-                    });
+                    let limits = crate::serve::Limits::default();
+                    let task = tokio::spawn(crate::serve::serve(
+                        listener,
+                        app,
+                        limits,
+                        shutdown.cancelled_owned(),
+                    ));
                     self.listeners.push(Listener {
                         address,
                         cancel,

@@ -75,6 +75,8 @@ jobs:
       - run: python3 tests/lampa.py --binary target/debug/torrstream-lite
       # Uses the runner's private network address, like a TV on a home network.
       - run: python3 tests/network.py --binary target/debug/torrstream-lite
+      # Starts the server without the system's root certificates, as on a router.
+      - run: python3 tests/smoke.py --binary target/debug/torrstream-lite
 
       - uses: actions/upload-artifact@v7
         if: failure()
@@ -170,7 +172,7 @@ jobs:
               ...(notes ? ["## What's new", notes, ''] : []),
               '## Download',
               ...(macos ? ['- **macOS** (Apple Silicon, macOS 12 or later): the `.dmg`'] : []),
-              ...(keenetic ? [`- **Keenetic** (ARM64 router with Entware): the \`linux-arm64.tar.gz\`. Experimental, not yet tested on a router; see the [setup](${repo}/blob/main/docs/router.md)`] : []),
+              ...(keenetic ? [`- **Keenetic** (ARM64 router with Entware): the \`linux-arm64.tar.gz\`. Experimental: it has run on one router so far, a Keenetic Ultra (KN-1811); see the [router guide](${repo}/blob/main/docs/router.md)`] : []),
               '',
               'Each download has a `.sha256` checksum file next to it.',
               ...(macos ? [
@@ -234,8 +236,6 @@ jobs:
 
       - name: Build the static Keenetic binary
         if: matrix.platform == 'keenetic'
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           rustup target add aarch64-unknown-linux-musl
           python3 -m venv .build/cross
@@ -244,9 +244,23 @@ jobs:
           file dist/torrstream-lite-linux-arm64
           file dist/torrstream-lite-linux-arm64 | grep -q 'ARM aarch64'
           file dist/torrstream-lite-linux-arm64 | grep -q 'statically linked'
-          mkdir -p release-assets
-          tar -czf "release-assets/TorrStream-Lite-$VERSION-linux-arm64.tar.gz" \
-            LICENSE THIRD_PARTY_NOTICES.txt -C dist torrstream-lite-linux-arm64
+
+      # This machine can't run an ARM64 program, so QEMU runs it, as the Cortex-A53
+      # processor routers have: the binary must start without the system's root
+      # certificates, answer /api/status and stream from a local peer. The emulator uses
+      # this machine's kernel, so it says nothing about a router's. The one request that
+      # leaves the machine checks the built-in root certificates against a real site.
+      - name: Run the Keenetic binary on an emulated router processor
+        if: matrix.platform == 'keenetic'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+          python3 tests/smoke.py --binary dist/torrstream-lite-linux-arm64 \
+            --runner 'qemu-aarch64 -cpu cortex-a53' --https-url https://github.com/robots.txt
+
+      - name: Package the Keenetic download
+        if: matrix.platform == 'keenetic'
+        run: sh scripts/package-router.sh
 
       - name: Add checksums
         run: |

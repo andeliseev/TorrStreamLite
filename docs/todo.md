@@ -4,7 +4,12 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 ## Not verified yet
 
-- [ ] The Keenetic build on a router: kernel compatibility, the real 4K bitrate, seeks, peak memory, CPU, a long run alongside normal router and VPN traffic
+- [ ] The Keenetic build has run on one router, a KN-1811, for one 13-minute 4K film ([measurements](development.md#measurements)). Still open: seek times by the clock, the router's own free memory and load while it plays, a long run alongside normal router and VPN traffic, the release after five idle minutes (closing the film in Lampa released it at once), and other models. What to run and read off is in [router.md](router.md#first-run-checklist); the release only runs the binary on an emulated processor
+- [ ] The router's start script works on a KN-1811: `start`, `stop`, `restart`, `status`, the server outliving the SSH session that started it, its lines in the system log, and Entware starting it when the router boots (running again about a minute into a restart). Not seen yet: that `chmod -x` keeps it from starting, and the five tries when the home network's address comes up late
+- [ ] The three lines the server prints when it starts at boot weren't found in the KN-1811's system log, while those of a later `restart` were. The router's clock isn't set that early, so they may be there under an old date, or the log may not take lines yet. Look at the start of the log after a restart of the router
+- [ ] On a router the server is in the DHT network around the clock, also with no torrent loaded, because the start script runs it from boot. Join the DHT with the first torrent and leave it some time after the last, or make `--no-dht` the script's default
+- [ ] The built-in root certificates on a real router: the KN-1811 with a fresh Entware had certificates of its own (where from wasn't checked), so the server used those
+- [ ] The IPv4-only mode on a system that really has no IPv6 (a Keenetic without that component): the tests only ask for it with `--ipv4-only`, and the DHT stays off in them
 - [ ] The local network prompt the first time other devices are allowed
 - [ ] Downloading from all peers at once on a real swarm: the speed, and that the piece a player waits for still arrives first
 
@@ -22,7 +27,9 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 ## Security
 
-- [ ] Header and idle timeouts and a connection limit per listener: `axum::serve` sets no timer, so slow or idle connections stay open (matters with **Allow other devices** on, and on the router)
+- [ ] A request's body may arrive as slowly as its sender likes, and a response nobody reads keeps its connection, finished or not: only a request's headers and idle connections have a time limit. A TV switched off in the middle of a film holds its reader, and so the cache, until the system gives up on the connection, which takes many minutes; TCP keep-alives on accepted connections would notice sooner
+- [ ] The router's start script runs the server as root, as Entware does with its services; it needs no privileges
+- [ ] Stopping a torrent can log `manage_peer finished with error: chunk tracker empty, torrent was paused` at error level, with a peer's address: the engine reports every task that ends with an error that way. On the router those lines go to the system log
 - [ ] Torrent URLs can point at services on the home network or the router itself, and the error says whether they answered. Refusing private addresses would break a local Jackett, so at least make those errors generic
 
 ## App and UI
@@ -48,6 +55,14 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 ## Distribution
 
 - [ ] Code signing and notarization
+- [ ] A build for the many Keenetic models with MIPS processors; only ARM64 ones can run today's
+- [ ] The router's start script holds its settings (address, cache, peers), so a newer script replaces them; read them from a file of their own
+- [ ] On a router the server can only be switched off and on over SSH, with the start script; nothing in the page or the router's web interface does it
+- [ ] `scripts/package-router.sh` packs the Keenetic archive with the owner names of the account that ran it (`tar -tv` shows them); give the entries a fixed owner
+- [ ] The router guide's Entware steps come from one install: a KN-1811, Entware in the router's own storage, KeeneticOS as it was in November 2026. A USB drive, other models and later versions follow Keenetic's own instructions, untried here. Nobody has run its commands for uninstalling Entware
+- [ ] The router guide's commands are for the shell of a Mac or of Linux; copying a file with `ssh … < file` doesn't work in Windows PowerShell
+- [ ] The README and the router guide are in English only, while Keenetic routers and Lampa are mostly used by Russian speakers
+- [ ] The router's default port, 8090, is also the default of Keenetic's own torrent client (Download Station); the server says the port is taken, but not by what
 - [ ] A Windows version. The server is mostly portable (`network.rs` and `memory.rs` need Windows code). The window could move from Swift to Tauri 2, as in Unified Mail, which would also bring Windows installers, auto-update and a universal Mac build
 
 ## Code quality
@@ -61,9 +76,9 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 
 - [ ] The streaming tests run a debug build, where a panic only ends one task; release builds abort the whole server. Test a release build and fail on `panicked` in the logs
 - [ ] Harden the workflow: a read-only token in Build, actions pinned by SHA, hashed `pip install`, build attestations
-- [ ] The router build doesn't start without CA certificates (Entware's `ca-certificates`); bundle root certificates or document it, and smoke-run the binary
 - [ ] Some test checks can hardly fail: no memory bound at small caches, "cache budget respected", and "no files written" looks only at the working directory
-- [ ] `docs/router.md` runs a file name the tarball doesn't have, and `tests/video_smoke.py` isn't documented
+- [ ] `tests/video_smoke.py` isn't documented
+- [ ] The test tracker in `tests/e2e.py` prints a `BrokenPipeError` traceback now and then, when the engine drops an announce it no longer needs (seen in `tests/lampa.py`, with 0.2.9 too). The test still passes, but it reads like a failure
 - [ ] Pin the Rust toolchain, and drop engine features the app doesn't use (uTP, UPnP, LSD, SOCKS) to shrink the binary
 - [ ] `THIRD_PARTY_NOTICES.txt` adds 246 KB to the server, half of it the MIT text repeated for each crate's copyright lines; one copy of the text under all of those lines would take a fraction of that
 - [ ] A re-taken piece can lose its requests if the peer-side cancel runs after the same peer took it again; the stall rule moves it 5 s later

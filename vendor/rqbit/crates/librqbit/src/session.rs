@@ -491,6 +491,12 @@ pub struct SessionOptions {
     /// Override the client name and version used in User-Agent headers and
     /// peer extended handshakes. Defaults to "rqbit X.Y.Z".
     pub client_name_and_version: Option<String>,
+
+    /// What the HTTP(S) client for trackers and torrent URLs is built from, in place of
+    /// `reqwest::Client::builder`. The proxy, bind device and User-Agent are set on top
+    /// of it. For a caller that chooses the root certificates itself, where the system
+    /// has none.
+    pub http_client_builder: Option<fn() -> reqwest::ClientBuilder>,
 }
 
 impl Default for SessionOptions {
@@ -519,6 +525,7 @@ impl Default for SessionOptions {
             disable_local_service_discovery: false,
             ipv4_only: false,
             client_name_and_version: None,
+            http_client_builder: None,
         }
     }
 }
@@ -716,13 +723,14 @@ impl Session {
                 .unwrap_or_else(|| crate::client_name_and_version().to_owned());
 
             let reqwest_client = {
+                let new_builder = opts.http_client_builder.unwrap_or(reqwest::Client::builder);
                 let builder = if let Some(proxy_url) = proxy_url {
                     let proxy = reqwest::Proxy::all(proxy_url)
                         .context("error creating socks5 proxy for HTTP")?;
-                    reqwest::Client::builder().proxy(proxy)
+                    new_builder().proxy(proxy)
                 } else {
                     #[allow(unused_mut)]
-                    let mut b = reqwest::Client::builder();
+                    let mut b = new_builder();
                     #[cfg(not(windows))]
                     if let Some(bd) = opts.bind_device_name.as_ref() {
                         b = b.interface(bd);
@@ -770,9 +778,10 @@ impl Session {
                 None
             };
 
-            let udp_tracker_client = UdpTrackerClient::new(token.clone(), bind_device.as_ref())
-                .await
-                .context("error creating UDP tracker client")?;
+            let udp_tracker_client =
+                UdpTrackerClient::new(token.clone(), bind_device.as_ref(), opts.ipv4_only)
+                    .await
+                    .context("error creating UDP tracker client")?;
 
             let lsd = {
                 if opts.disable_local_service_discovery {
