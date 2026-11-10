@@ -163,8 +163,6 @@ The home page, privacy policy and support page are at <https://andeliseev.github
 
 If what the app connects to or keeps changes, update `torrstream-lite/privacy.html` there and its effective date.
 
-Until November 2026 the pages were in the unified-mail repository's `site/` folder and published from there with `git subtree`.
-
 ## Code formatting
 
 Rust uses `cargo fmt`, Swift uses Xcode's `swift-format`, and the control page uses Prettier 3.6.2. Prettier is only a formatter: nothing in the build needs Node.
