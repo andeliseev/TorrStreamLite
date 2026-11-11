@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+## 0.2.10 (2026-11-11)
+
 - Keenetic build: it now starts on a router that has no root certificates installed. There it checks HTTPS torrent links and trackers against a list built into it (Mozilla's); before, it didn't start on such a router. A router that has certificates keeps using its own.
 - Keenetic build: it also starts on a router without IPv6, which on a Keenetic is a component that may not be installed. It then uses IPv4 only.
 - Keenetic build: the download now includes a script that starts the server when the router boots, and stops, restarts and reports on it.
