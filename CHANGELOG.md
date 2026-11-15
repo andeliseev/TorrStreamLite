@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+## 0.2.11 (2026-11-15)
+
 - Lampa installed on a Samsung TV can open torrents now. The server refused its requests, although Lampa's settings showed the server as found. Seen on a TV with Tizen 5.5.
 - Seeking works on Samsung TVs. After a seek the picture went back to where it was, because the TV's player took the server for one that can't seek.
 
