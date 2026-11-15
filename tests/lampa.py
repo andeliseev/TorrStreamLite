@@ -3,9 +3,10 @@
 
 Request shapes follow yumata/lampa-source's torserver.js and reguest.js:
 JSON bodies with jQuery's default form content type, from Lampa's web origin.
-The opaque "null" origin of TV apps is accepted only on listeners that face the
-home network, so tests/network.py checks it on the TV listener; here it must be
-refused. This verifies the protocol, not the physical Samsung TV or its decoder.
+The origin of TV apps, the opaque "null" or "file://" from older TVs, is accepted
+only on listeners that face the home network, so tests/network.py checks it on the
+TV listener; here it must be refused. This verifies the protocol, not the physical
+Samsung TV or its decoder.
 """
 import argparse
 import json
@@ -113,9 +114,11 @@ def main():
             for origin in ('http://lampa.mx', 'http://lampa.app'):
                 error(403, '/settings', origin=origin, data={'action': 'get'})
             mark("Lampa ping and playback connection accept form-labelled JSON and Lampa's HTTPS origins")
-            # Any web page can send "null" from a sandboxed frame; the loopback server refuses it.
-            error(403, '/settings', origin='null', data={'action': 'get'})
-            error(403, '/torrents', origin='null', data={'action': 'list'})
+            # Any web page can send "null" from a sandboxed frame, and a page saved to this Mac
+            # sends "null" or "file://"; the loopback server refuses both.
+            for origin in ('null', 'file://'):
+                error(403, '/settings', origin=origin, data={'action': 'get'})
+                error(403, '/torrents', origin=origin, data={'action': 'list'})
             # A page that rebinds its own domain to this address still sends that domain.
             error(403, '/settings', data={'action': 'get'}, headers={'Host': 'rebind.example:8090'})
             error(403, '/api/status', origin=None, headers={'Host': 'rebind.example'})
@@ -193,6 +196,19 @@ def main():
             with request(stream + '&play', method='HEAD') as response:
                 assert int(response.headers['Content-Length']) == swarm.movie_size
             mark('TV playback and seek responses are byte-for-byte correct')
+
+            # A Samsung TV's own player (samsung-agent/1.1) asks like this, and looks for the
+            # header names in exactly this case: with lowercase ones it won't seek.
+            samsung = {'User-Agent': 'samsung-agent/1.1', 'Accept': '*/*', 'Accept-Encoding': 'identity',
+                       'Range': 'bytes=0-'}
+            with request(stream + '&play', origin=None, headers=samsung) as response:
+                assert response.status == 206
+                names = response.headers.keys()
+                for name in ('Content-Range', 'Accept-Ranges', 'Content-Length', 'Content-Type'):
+                    assert name in names, (name, names)
+                assert response.headers['Content-Range'] == f'bytes 0-{swarm.movie_size - 1}/{swarm.movie_size}'
+                assert response.read(10003) == payload(swarm.prefix, 10003)
+            mark("A Samsung TV's player gets header names in the case it looks for, so it can seek")
 
             api('/viewed', {'action': 'set', 'hash': hash_value, 'file_index': 2, 'timecode': 123.5})
             assert api('/viewed', {'action': 'list', 'hash': hash_value}) == [

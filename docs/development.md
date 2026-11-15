@@ -94,6 +94,8 @@ The local peer speaks the real BitTorrent protocol and never contacts public swa
 
 Machine-readable results go to `test-results/` (not committed). The native window, a physical TV and the router still need manual checks; the router's are in [router.md](router.md#first-run-checklist), with `tests/watch.py` to record a run from the Mac.
 
+To see what a TV's player really asks for, start the server with `RUST_LOG=torrstream_lite=debug`: every stream request is logged with its range and with how it ended (how many bytes went out, after how long, and who closed it), and `torrstream_lite=trace` adds all the headers of each request. A server run by hand on the Mac's address in the home network can stand in for the app or the router while you look: `target/release/torrstream-lite --listen 192.168.1.35:8091`, with that address entered in Lampa. That is how the two faults with a Samsung TV were found: its Lampa sends `file://` as its origin, and its player needs capitalized header names to seek.
+
 ### Measurements
 
 On an Apple Silicon Mac, November 8, 2026, with the local peer:
@@ -245,6 +247,7 @@ The workflow then:
 - [ ] **Stop & release RAM**: server memory drops back near idle
 - [ ] Add a second torrent while one is loaded: a clear message to stop the first
 - [ ] Turn on **Allow other devices**: the address appears with port 8090; Lampa on the TV connects, lists the files, plays and seeks
+- [ ] Lampa installed on a Samsung TV: it opens a torrent (its origin there is `file://`), and a seek lands where it was sent (the TV's player needs capitalized header names)
 - [ ] Turn it off while the TV plays: the TV stream stops, Mac playback continues
 - [ ] Change the port in Settings, quit and reopen: the switch and the port are kept
 - [ ] Settings → Appearance: System, Light and Dark switch the page and the titlebar; the choice is kept after reopening

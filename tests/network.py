@@ -68,18 +68,23 @@ with tempfile.TemporaryDirectory(prefix='torrstream-network-') as tmp:
         except urllib.error.HTTPError as e: assert e.code == 403
         else: raise AssertionError('Remote client changed LAN settings')
         mark('TV clients cannot change local network settings')
-        # Packaged TV apps such as Lampa on Samsung send Origin: null and form-labelled JSON.
+        # TV apps with Lampa built in send Origin: null and form-labelled JSON.
         tv_app = {'Origin': 'null', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
-        with request(lan, '/settings', json.dumps({'action': 'get'}).encode(), tv_app) as r:
-            assert r.headers['Access-Control-Allow-Origin'] == 'null'
-            assert json.load(r)['CacheSize'] == 6 * 1048576
-        with request(lan, '/torrents', json.dumps({'action': 'list'}).encode(), tv_app) as r:
-            assert json.load(r)[0]['hash'] == torrent['hash']
+        # Older TV engines send file:// instead: Lampa on a Samsung TV with Tizen 5.5 does.
+        old_tv_app = dict(tv_app, Origin='file://')
+        for app in (tv_app, old_tv_app):
+            with request(lan, '/settings', json.dumps({'action': 'get'}).encode(), app) as r:
+                assert r.headers['Access-Control-Allow-Origin'] == app['Origin']
+                assert json.load(r)['CacheSize'] == 6 * 1048576
+            with request(lan, '/torrents', json.dumps({'action': 'list'}).encode(), app) as r:
+                assert json.load(r)[0]['hash'] == torrent['hash']
         # Lampa opened over plain HTTP on the TV works at the TV address.
         with request(lan, '/settings', json.dumps({'action': 'get'}).encode(), dict(tv_app, Origin='http://lampa.mx')) as r:
             assert r.headers['Access-Control-Allow-Origin'] == 'http://lampa.mx'
         refused = [(base, '/settings', {'action': 'get'}, tv_app),
                    (lan, '/api/torrents', {'link': 'invalid'}, tv_app),
+                   (base, '/settings', {'action': 'get'}, old_tv_app),
+                   (lan, '/api/torrents', {'link': 'invalid'}, old_tv_app),
                    (lan, '/settings', {'action': 'get'}, {'Host': 'rebind.example:8090'}),
                    (base, '/api/status', None, {'Host': 'rebind.example'}),
                    # Any device on the network can answer for a .local name.
@@ -90,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix='torrstream-network-') as tmp:
             try: request(url, path, json.dumps(body).encode() if body else None, headers)
             except urllib.error.HTTPError as e: assert e.code == 403, (url, path, e.code)
             else: raise AssertionError(f'{url}{path} accepted {headers}')
-        mark('TV apps\' null origin works only on the TV listener; unknown host names are refused')
+        mark('TV apps\' origins, null and file://, work only on the TV listener; unknown host names are refused')
         # Settings -> Cache: only the Mac changes it, and the loaded torrent keeps its cache.
         assert api(base, '/api/cache', {'mib': 192}) == {'mib': 192}
         status = api(base, '/api/status')

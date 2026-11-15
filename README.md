@@ -88,7 +88,7 @@ The page at the router's address, such as `http://192.168.1.1:8090`, is the Mac 
 | macOS says it can't verify the app | Follow [First launch](#first-launch) |
 | **Play** says to install VLC or IINA | Install one of them, or click the copy button next to the file and open that address in your player |
 | A magnet link doesn't load | The window says what it found: how many peers, how many of them answered, and what the torrent's tracker said. If the tracker no longer has the torrent, or no peer answers, look for another release of it |
-| The TV app can't connect | **Allow other devices** must be on, and the address in the TV app the one the sidebar shows. The Mac must be awake and in the same network as the TV, and macOS must allow the app to find devices on the local network (**System Settings → Privacy & Security → Local Network**) |
+| The TV app can't connect | **Allow other devices** must be on, and the address in the TV app the one the sidebar shows. The Mac must be awake and in the same network as the TV, and macOS must allow the app to find devices on the local network (**System Settings → Privacy & Security → Local Network**). Lampa must be the one opened from `lampa.mx` or `lampa.app`, or a TV app with Lampa built in: pages from other addresses are refused. The router build can allow them, see [its guide](docs/router.md#using-it) |
 | **Home network** says it cannot open the address | Something else on the Mac uses port 8090, such as TorrServer. Choose another port in **Settings**, and enter the same in the TV app |
 | Something on the router | See [If it doesn't work](docs/router.md#if-it-doesnt-work) in the router guide |
 

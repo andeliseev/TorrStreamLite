@@ -349,16 +349,19 @@ fn origin_allowed(origin: &str, host: &str, path: &str, configured: &[String], l
         return true;
     }
     // Lampa's defaults apply only to the compatibility API, never to network
-    // controls or /api/*. Packaged TV apps have the opaque "null" origin, but so
-    // does any web page's sandboxed frame. It is accepted only on listeners that
-    // face the home network, where the TV is, never on the Mac's loopback server.
+    // controls or /api/*. A TV app with its pages built in has no web address: its
+    // origin is the opaque "null", or "file://" from older engines (Lampa on a Samsung
+    // TV with Tizen 5.5 sends that with every POST). Any web page's sandboxed frame has
+    // "null" too, and a page saved to a computer and opened there has one of the two.
+    // So both are accepted only on listeners that face the home network, where the TV
+    // is, never on the Mac's loopback server.
     let compat = matches!(
         path,
         "/" | "/echo" | "/settings" | "/torrents" | "/cache" | "/viewed" | "/stream"
     ) || path.starts_with("/stream/");
     compat
         && match origin {
-            "null" => lan,
+            "null" | "file://" => lan,
             "https://lampa.mx" | "https://lampa.app" => true,
             // Plain HTTP can be faked on the way, so only on listeners that face the TV.
             "http://lampa.mx" | "http://lampa.app" => lan,
@@ -1087,9 +1090,23 @@ async fn stream_file(
                 .map(|f| (f.len, f.relative_filename.to_string_lossy().into_owned()))
         })?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "File not found".into()))?;
+    // What a player asked for and how it ended, for finding out why one of them can't play
+    // or seek: RUST_LOG=torrstream_lite=debug shows it. No file names, only numbers.
+    static REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = REQUESTS.fetch_add(1, Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    let asked = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+            .to_owned()
+    };
+    tracing::trace!(id, headers = ?headers.iter().filter(|(name, _)| *name != header::AUTHORIZATION).collect::<Vec<_>>(), "Every header of a stream request");
     let range = match crate::range::parse(&headers, size) {
         Ok(r) => r,
         Err(()) => {
+            tracing::debug!(id, method = %method, file = one_based, range = asked("range"), size, "A player asks for a range the file doesn't have");
             return Ok(Response::builder()
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                 .header(header::CONTENT_RANGE, format!("bytes */{size}"))
@@ -1097,6 +1114,20 @@ async fn stream_file(
                 .unwrap());
         }
     };
+    tracing::debug!(
+        id,
+        method = %method,
+        file = one_based,
+        range = asked("range"),
+        start = range.start,
+        len = range.len,
+        size,
+        reading_now = active_readers(&active),
+        asks_dlna = headers.contains_key("getcontentfeatures.dlna.org"),
+        time_seek = asked("timeseekrange.dlna.org"),
+        agent = asked("user-agent"),
+        "A player asks for a stream"
+    );
     let mut builder = Response::builder()
         .status(if range.partial {
             StatusCode::PARTIAL_CONTENT
@@ -1133,6 +1164,7 @@ async fn stream_file(
     .ok()
     .and_then(Result::ok)
     .ok_or_else(|| {
+        tracing::debug!(id, "No reader slot came free in two seconds: 429");
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many players are reading at once for this cache size. Close one, or choose a bigger cache.".into(),
@@ -1145,13 +1177,15 @@ async fn stream_file(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<std::io::Result<Bytes>>(1);
     tokio::spawn(async move {
         let _permit = permit;
-        let result: std::io::Result<()> = async {
+        let mut handed_over = 0u64;
+        let mut first_bytes = None;
+        let result: std::io::Result<&'static str> = async {
             let mut remaining = range.len;
             while remaining > 0 {
                 let mut buffer = vec![0u8; IO_CHUNK.min(remaining as usize)];
                 let read = tokio::select! {
-                    _ = active.cancel.cancelled() => return Ok(()),
-                    _ = tx.closed() => return Ok(()),
+                    _ = active.cancel.cancelled() => return Ok("the torrent was stopped"),
+                    _ = tx.closed() => return Ok("the player closed the connection"),
                     // The player decides how long to wait for a slow torrent. Ending the
                     // response sends TV apps back to their menu, so give up only when the
                     // torrent sent nothing for as long as an idle one is kept.
@@ -1160,13 +1194,24 @@ async fn stream_file(
                 if read==0 { return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,"Torrent stream ended early")); }
                 buffer.truncate(read); remaining-=read as u64; active.touched.store(now(),Ordering::Relaxed);
                 tokio::select! {
-                    _ = active.cancel.cancelled() => return Ok(()),
-                    sent = tx.send(Ok(Bytes::from(buffer))) => if sent.is_err() { return Ok(()); },
+                    _ = active.cancel.cancelled() => return Ok("the torrent was stopped"),
+                    sent = tx.send(Ok(Bytes::from(buffer))) => if sent.is_err() { return Ok("the player closed the connection"); },
                 }
+                first_bytes.get_or_insert_with(|| started.elapsed().as_millis() as u64);
+                handed_over += read as u64;
             }
-            Ok(())
+            Ok("all of it was sent")
         }.await;
         drop(reader);
+        tracing::debug!(
+            id,
+            handed_over,
+            of = range.len,
+            first_bytes_ms = ?first_bytes,
+            ms = started.elapsed().as_millis() as u64,
+            outcome = %match &result { Ok(why) => (*why).to_owned(), Err(error) => error.to_string() },
+            "A stream ended"
+        );
         if let Err(e) = result {
             let _ = tx.try_send(Err(e));
         }
@@ -1571,45 +1616,47 @@ mod tests {
     }
 
     #[test]
-    fn null_origin_only_on_home_network_listeners() {
-        assert!(!origin_allowed(
-            "null",
-            "127.0.0.1:8090",
-            "/torrents",
-            &NONE,
-            false
-        ));
-        assert!(!origin_allowed(
-            "null",
-            "127.0.0.1:8090",
-            "/stream",
-            &NONE,
-            false
-        ));
-        for path in [
-            "/",
-            "/echo",
-            "/settings",
-            "/torrents",
-            "/cache",
-            "/viewed",
-            "/stream",
-            "/stream/a.mkv",
-        ] {
-            assert!(
-                origin_allowed("null", "192.168.1.35:8090", path, &NONE, true),
-                "{path}"
-            );
+    fn tv_app_origins_only_on_home_network_listeners() {
+        // "null", and "file://" from older TVs: a Samsung with Tizen 5.5 sends it.
+        for origin in ["null", "file://"] {
+            for path in ["/torrents", "/settings", "/stream"] {
+                assert!(
+                    !origin_allowed(origin, "127.0.0.1:8090", path, &NONE, false),
+                    "{origin} {path}"
+                );
+            }
+            for path in [
+                "/",
+                "/echo",
+                "/settings",
+                "/torrents",
+                "/cache",
+                "/viewed",
+                "/stream",
+                "/stream/a.mkv",
+            ] {
+                assert!(
+                    origin_allowed(origin, "192.168.1.35:8090", path, &NONE, true),
+                    "{origin} {path}"
+                );
+            }
+            for path in [
+                "/api/torrents",
+                "/api/network",
+                "/api/status",
+                "/licenses/app",
+            ] {
+                assert!(
+                    !origin_allowed(origin, "192.168.1.35:8090", path, &NONE, true),
+                    "{origin} {path}"
+                );
+            }
         }
-        for path in [
-            "/api/torrents",
-            "/api/network",
-            "/api/status",
-            "/licenses/app",
-        ] {
+        // Only the bare scheme is a TV app's origin, not a file's path or a look-alike.
+        for origin in ["file:///", "file://tv", "file:", "files://", "FILE://"] {
             assert!(
-                !origin_allowed("null", "192.168.1.35:8090", path, &NONE, true),
-                "{path}"
+                !origin_allowed(origin, "192.168.1.35:8090", "/settings", &NONE, true),
+                "{origin}"
             );
         }
     }
@@ -1644,7 +1691,7 @@ mod tests {
                 true
             ));
         }
-        for origin in ["https://lampa.mx.example", "https://example.com", "file://"] {
+        for origin in ["https://lampa.mx.example", "https://example.com"] {
             assert!(
                 !origin_allowed(origin, "192.168.1.35:8090", "/settings", &NONE, true),
                 "{origin}"

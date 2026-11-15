@@ -102,6 +102,12 @@ pub async fn serve(
                 hyper::server::conn::http1::Builder::new()
                     .timer(TokioTimer::new())
                     .header_read_timeout(limits.header_timeout)
+                    // "Content-Range", not "content-range". The names mean the same in
+                    // either case, but the player of a Samsung TV (samsung-agent/1.1, seen
+                    // on Tizen 5.5) looks for them in this one: given lowercase names it
+                    // took the stream for one that can't be searched, and answered every
+                    // seek by asking for the file from its start again.
+                    .title_case_headers(true)
                     .serve_connection(TokioIo::new(socket), service)
             );
             tokio::select! {
@@ -353,6 +359,21 @@ mod tests {
         let own = client.local_addr().unwrap().to_string();
         let response = read_until(&mut client, &own).await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        stop.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn header_names_go_out_capitalized() {
+        // A Samsung TV's player looks for "Content-Length" and its like in this case only.
+        let (address, stop, task) = start(limits(5_000, 4), Duration::ZERO).await;
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(REQUEST).await.unwrap();
+        let own = client.local_addr().unwrap().to_string();
+        let response = read_until(&mut client, &own).await;
+        for name in ["\r\nContent-Type: ", "\r\nContent-Length: ", "\r\nDate: "] {
+            assert!(response.contains(name), "{name:?} in {response}");
+        }
         stop.cancel();
         task.await.unwrap();
     }
