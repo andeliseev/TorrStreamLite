@@ -277,6 +277,7 @@ Start with what the server itself says. Started by hand ([the first start](#the-
 | The page opens, but torrents don't load | The page says what the lookup found. `nslookup github.com` on the router tells whether its DNS answers programs running on it |
 | `invalid peer certificate` when adding an HTTPS torrent URL | The router's clock is wrong, or its certificate store is out of date. `date` shows the clock. To try the built-in list instead, stop the server and start it by hand with `SSL_CERT_FILE=/dev/null` in front of the command |
 | On a Samsung TV, the picture goes back to where it was after a seek | Versions up to 0.2.10 sent header names in lowercase, and that TV's player then doesn't seek. [Update](#update) the server |
+| After a pause the film stops to load again and again, until it's opened anew | Versions up to 0.2.11 lost their peers while a player was paused: many peers close a connection that asks for nothing for a minute, and the server then waited up to an hour before it tried them again. [Update](#update) the server |
 | The film stops to load | **Download** on the page shows the speed and every peer. A speed below the film's bitrate means the torrent's peers don't send fast enough: try another release of the film. If the speed is high and it still stops, look at `top` and `head -3 /proc/meminfo` on the router while it plays, and please report it |
 | The router or the Internet is slow while a film plays | Lower `PEERS` or `CACHE_MIB` in the script and `restart`. `stop` gives everything back at once |
 

@@ -495,7 +495,8 @@ fn active_json(a: &Active) -> Value {
         "preload_error":p.preload_error,
         "torrent_size":p.torrent_size, "loaded_size":cached_bytes(a), "download_speed":p.speed,
         "active_peers":peers.map_or(0, |p| p.live),
-        "total_peers":peers.map_or(0, |p| p.live + p.queued + p.connecting),
+        // Also the peers set aside while nothing is asked of them: they come back with the next piece.
+        "total_peers":peers.map_or(0, |p| p.live + p.queued + p.connecting + p.not_needed),
         "file_stats":files_json(a), "active_readers":active_readers(a)})
 }
 /// A torrent whose details are on the way, in TorrServer's shape. Without a file list,

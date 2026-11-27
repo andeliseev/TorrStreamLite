@@ -4,6 +4,8 @@ What changed in each version of TorrStream Lite. The newest is at the top; each 
 
 ## Unreleased
 
+- Playback no longer gets slow or stops after a pause. A paused player asks the peers for nothing, and many of them (qBittorrent after one minute) close such a connection. The app took that for a failure and waited longer each time before it tried the peer again, up to an hour, so after a few minutes of pause few or no peers were left until the torrent was loaded again. Now those peers come back as soon as playback goes on, the fastest first. The same loss happened slowly during a long film, to peers that weren't needed for a while.
+
 ## 0.2.11 (2026-11-15)
 
 - Lampa installed on a Samsung TV can open torrents now. The server refused its requests, although Lampa's settings showed the server as found. Seen on a TV with Tizen 5.5.

@@ -56,6 +56,7 @@ python3 tests/e2e.py --cache-mib 6 --size-mib 64 --corrupt-first --report test-r
 python3 tests/e2e.py --cache-mib 6 --size-mib 64 --stalling-peer --report test-results/stalling-peer.json
 python3 tests/e2e.py --cache-mib 16 --size-mib 48 --peers 12 --peer-mbps 10 --report test-results/many-peers.json
 python3 tests/e2e.py --cache-mib 96 --size-mib 256 --rate-mbps 80 --report test-results/router-profile.json
+python3 tests/pause.py
 python3 tests/lampa.py
 python3 tests/network.py
 python3 tests/smoke.py
@@ -81,6 +82,7 @@ The local peer speaks the real BitTorrent protocol and never contacts public swa
 - Magnet metadata exchange, rejecting and recovering from a corrupted piece, and bounded allocation
 - A second peer that unchokes the engine and then answers nothing, as a peer that chokes it mid-piece does: the other peer takes over its pieces, and no read waits 15 s or more
 - A paused player with a full cache, so peers have nothing to send for longer than the 15 s read timeout: they stay connected, and the next seek starts at once. The test peers drop a connection that stays silent for 12 s, as real ones do after a few minutes, so this also checks the engine's keep-alives
+- A long pause with peers that close a connection that asks for nothing, as qBittorrent does after 60 s (the test peers after 3 s): nothing connects to them again while the player is paused; playing on gets its data within seconds, from as many peers as it takes; and a seek after a second pause starts at once, with every peer back. Then the end of a file, where one peer takes a piece and sends nothing while the others have closed their connections: one of them comes back for it (`tests/pause.py`)
 - Twelve peers limited to 10 Mbps each: they all send at once, faster than four could
 - One torrent at a time, invalid ranges, and HEAD requests that download nothing
 - Stop during a slow HTTP response, cache teardown, and no files written by the server
@@ -122,6 +124,17 @@ On a router there is one run so far, recorded with `tests/watch.py` on 2026-11-1
 | Peers | 10 to 15 |
 
 Every status reading was answered while the server ran (also after the router was restarted, where the start script brought it back within a minute), the server logged nothing but its three starting lines, and by the viewer's account the film played and seeked without trouble; nobody timed the seeks. That router had root certificates and IPv6 of its own, so the built-in certificate list and the IPv4-only mode weren't used. Not measured yet: the router's own free memory and load while it plays, and a long run next to the home's other traffic.
+
+A pause on the same router, 2026-11-27, with a build of the sources after 0.2.11 that sets aside the peers that close an idle connection (see [Memory](architecture.md#memory)); a film with 4 MiB pieces from an Internet swarm, read every 5 s from `/api/status`, `/api/peers` and Lampa's `get`:
+
+| Reading | Result |
+| --- | --- |
+| Playing, the minute before the pause | 9 to 10 peers, 4.7 MB/s on average |
+| During a pause of 4 min 57 s | Three peers closed their connections after about 35 s, three more within the first minute, and two were left at the end. Lampa's `total_peers` was 10 then: those two and the eight set aside |
+| The first 5 s after playing on | 10 peers again, the eight that had left each on their second connection; 6.9 MB/s |
+| The next 5 s | 10 peers, 8.0 MB/s; 60 MiB in those 10 s |
+
+The download then stopped again, with the film paused, so nothing after those ten seconds was seen. A few hours earlier, with the build before this change and three qBittorrent peers connected, all three closed 63 s after the downloads stopped and came back 10 to 20 s later; the film was closed then.
 
 ## Third-party notices
 

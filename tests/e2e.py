@@ -63,7 +63,7 @@ def recv_exact(sock, n):
     return bytes(out)
 
 class Swarm:
-    def __init__(self, size_mib, corrupt=False, source=None, stalling_peer=False, peers=1, peer_mbps=0, metadata_delay=0):
+    def __init__(self, size_mib, corrupt=False, source=None, stalling_peer=False, peers=1, peer_mbps=0, metadata_delay=0, idle_kick=0):
         self.source = Path(source) if source else None
         self.metadata_delay = metadata_delay  # seconds before each answer to a magnet link's metadata request
         self.prefix = 0 if source else PIECE + 123
@@ -76,6 +76,10 @@ class Swarm:
         self.info_hash = hashlib.sha1(self.info).digest()
         self.corrupt = corrupt; self.corrupted = False; self.lock = threading.Lock()
         self.bytes_served = 0; self.stalled_requests = 0
+        # Seconds after which a peer closes a connection that's interested, unchoked and asks for
+        # nothing, as qBittorrent's engine does after 60 (libtorrent's timed_out_no_request);
+        # 0 for never. `connections` and `kicked` count what the serving peers accepted and closed.
+        self.idle_kick = idle_kick; self.connections = 0; self.kicked = 0
         rate = peer_mbps*1_000_000/8  # bytes per second per connection, 0 for no limit
         count=len(self.hashes)//20
         bits=bytearray([255]*((count+7)//8))
@@ -88,9 +92,24 @@ class Swarm:
                 # also checks the engine's keep-alives.
                 s=self.request; s.settimeout(12)
                 def send(data): s.sendall(struct.pack('!I',len(data))+data)
+                interested=False; asked=time.monotonic()
+                def recv_exact(s,n):
+                    out=bytearray()
+                    while len(out)<n:
+                        kick=swarm.idle_kick and interested
+                        s.settimeout(max(.05,asked+swarm.idle_kick-time.monotonic()) if kick else 12)
+                        try: part=s.recv(n-len(out))
+                        except socket.timeout:
+                            if not kick: raise
+                            with swarm.lock: swarm.kicked+=1
+                            raise EOFError()
+                        if not part: raise EOFError()
+                        out.extend(part)
+                    return bytes(out)
                 try:
                     handshake=recv_exact(s,68)
                     if handshake[28:48]!=swarm.info_hash: return
+                    with swarm.lock: swarm.connections+=1
                     s.sendall(b'\x13BitTorrent protocol'+b'\0\0\0\0\0\x10\0\0'+swarm.info_hash+b'-PY0001-123456789012')
                     send(b'\x05'+bits); send(b'\x01')
                     send(b'\x14\x00'+bencode({b'm':{b'ut_metadata':1},b'metadata_size':len(swarm.info),b'reqq':16}))
@@ -100,7 +119,9 @@ class Swarm:
                         if n==0: continue
                         if n>128*1024: return
                         msg=recv_exact(s,n)
+                        if msg[0] in (2,3): interested=msg[0]==2; asked=time.monotonic()
                         if msg[0]==6:
+                            asked=time.monotonic()
                             piece,off,length=struct.unpack('!III',msg[1:])
                             if length>BLOCK or piece*PIECE+off+length>swarm.total: return
                             data=swarm.data_at(piece*PIECE+off,length)

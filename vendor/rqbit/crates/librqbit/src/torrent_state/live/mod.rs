@@ -172,6 +172,10 @@ impl TorrentStateLocked {
 
 const FLUSH_BITV_EVERY_BYTES: u64 = 16 * 1024 * 1024;
 
+/// A peer set aside for closing an idle connection isn't tried again sooner than this
+/// after we last connected to it.
+const SET_ASIDE_RECONNECT: Duration = Duration::from_secs(10);
+
 pub enum AddIncomingPeerResult {
     Added,
     AlreadyActive,
@@ -349,9 +353,16 @@ impl TorrentStateLive {
         if state.files.ram_cache_slots().is_some() {
             let weak = Arc::downgrade(&state);
             state.spawn(debug_span!("ram_scheduler"), "ram_scheduler", async move {
+                let mut waiting = None;
                 loop {
                     if let Some(s) = weak.upgrade() {
-                        s.prune_ram_requests()?;
+                        let piece = s.prune_ram_requests()?;
+                        // A connected peer that's free takes a waiting piece at once. One
+                        // that's still waiting a tick later has nobody.
+                        if piece.is_some() && piece == waiting {
+                            s.reconnect_a_peer_set_aside();
+                        }
+                        waiting = piece;
                     } else {
                         return Ok(());
                     }
@@ -366,12 +377,15 @@ impl TorrentStateLive {
         self.new_pieces_notify.notify_waiters();
     }
 
-    fn prune_ram_requests(&self) -> crate::Result<()> {
+    /// Cancels the pieces no reader wants any more. Returns the first wanted piece that's
+    /// waiting for a peer to take it.
+    fn prune_ram_requests(&self) -> crate::Result<Option<u32>> {
         let Some(slots) = self.files.ram_cache_slots() else {
-            return Ok(());
+            return Ok(None);
         };
         let window = self.streams.ram_window(&self.lengths, slots);
         let mut cancelled = Vec::new();
+        let waiting;
         {
             let mut g = self.lock_write("prune_ram_requests");
             let pieces = g.get_pieces_mut()?;
@@ -384,6 +398,7 @@ impl TorrentStateLive {
                 self.files.release_ram_piece(id);
                 cancelled.push((id, peer));
             }
+            waiting = pieces.waiting_ram_piece(&window);
         }
         // Never acquire a peer lock while holding the torrent write lock.
         for (id, peer) in cancelled {
@@ -393,7 +408,48 @@ impl TorrentStateLive {
                 });
         }
         self.new_pieces_notify.notify_waiters();
-        Ok(())
+        Ok(waiting)
+    }
+
+    /// Queues one of the peers that closed a connection we asked nothing on (see
+    /// `on_peer_died`), now that a wanted piece has no connected peer to take it: the one
+    /// that downloaded its pieces fastest, then those that never got one. The scheduler
+    /// calls it every tick the piece goes on waiting, so as many come back as it takes and
+    /// no more: the rest would hold a peer's upload slot for nothing until it closes on us
+    /// again. Not a peer we connected to less than `SET_ASIDE_RECONNECT` ago, so one that
+    /// keeps closing on us is tried that often at most. Call it without the state lock,
+    /// like every walk of the peer table.
+    fn reconnect_a_peer_set_aside(&self) {
+        if self.peers.stats.not_needed.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let fastest = self
+            .peers
+            .states
+            .iter()
+            .filter(|peer| {
+                let peer = peer.value();
+                matches!(peer.get_state(), PeerState::NotNeeded)
+                    && peer.outgoing_address == Some(peer.addr)
+                    && peer.last_connect_is_older_than(SET_ASIDE_RECONNECT)
+            })
+            .min_by_key(|peer| {
+                let counters = &peer.value().stats.counters;
+                counters
+                    .average_piece_download_time()
+                    .unwrap_or(Duration::MAX)
+            })
+            .map(|peer| *peer.key());
+        let queued = fastest.and_then(|addr| {
+            self.peers
+                .with_peer_mut(addr, "reconnect a peer set aside", |peer| {
+                    peer.reconnect_not_needed_peer(&self.peers)
+                })
+                .flatten()
+        });
+        if let Some(addr) = queued {
+            let _ = self.peer_queue_tx.send(addr);
+        }
     }
 
     #[track_caller]
@@ -1340,6 +1396,8 @@ impl PeerHandler {
     fn on_peer_died(self, error: Option<crate::Error>) -> crate::Result<()> {
         let peers = &self.state.peers;
         let handle = self.addr;
+        // The peer had told us what it has, and we had asked it for nothing.
+        let mut asked_nothing = false;
         let mut pe = match peers.states.get_mut(&handle) {
             Some(peer) => TimedExistence::new(peer, "on_peer_died"),
             None => {
@@ -1357,6 +1415,7 @@ impl PeerHandler {
         match prev {
             PeerState::Connecting(_) => {}
             PeerState::Live(live) => {
+                asked_nothing = !live.bitfield.is_empty();
                 let mut g = self.state.lock_write("mark_chunk_requests_canceled");
 
                 // Release all pieces owned by this peer (fixes the bug where pieces
@@ -1381,6 +1440,7 @@ impl PeerHandler {
                 }
 
                 if released > 0 || had_inflight {
+                    asked_nothing = false;
                     self.state.new_pieces_notify.notify_waiters();
                 }
             }
@@ -1412,7 +1472,7 @@ impl PeerHandler {
             }
         };
 
-        let _error = match error {
+        let error = match error {
             Some(e) => e,
             None => {
                 trace!("peer died without errors, not re-queueing");
@@ -1420,6 +1480,31 @@ impl PeerHandler {
                 return Ok(());
             }
         };
+
+        // A paused player, or a full read-ahead, asks the peers for nothing, and they close
+        // such connections: qBittorrent's engine does 60 s after it unchoked us (libtorrent's
+        // timed_out_no_request), others after a few minutes without data. That's no fault of
+        // the peer's. Counted as one, each pause moved every peer up the backoff (10 s, a
+        // minute, six, then an hour), and playing on found nobody to download from. Coming
+        // back at once would only get the connection closed again, so the peer is set aside
+        // until a piece is wanted: `reconnect_a_peer_set_aside`, and all of them with every
+        // new stream (`reconnect_all_not_needed_peers`). Only when the connection ended:
+        // a peer we dropped for what it sent still waits out its backoff.
+        let closed = matches!(
+            error,
+            Error::PeerDisconnected | Error::Read(_) | Error::Write(_)
+        );
+        if closed
+            && asked_nothing
+            && !self.incoming
+            && !self.is_choked()
+            && self.state.files.ram_cache_slots().is_some()
+        {
+            debug!("peer closed a connection we asked nothing on, setting it aside");
+            pe.value_mut().stats.reset_backoff();
+            pe.value_mut().set_state(PeerState::NotNeeded, peers);
+            return Ok(());
+        }
 
         self.counters.errors.fetch_add(1, Ordering::Relaxed);
 

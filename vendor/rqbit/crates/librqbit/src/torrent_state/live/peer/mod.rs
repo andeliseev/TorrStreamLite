@@ -3,6 +3,7 @@ pub mod stats;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, atomic::Ordering};
+use std::time::{Duration, Instant};
 
 use librqbit_core::hash_id::Id20;
 use librqbit_core::lengths::{ChunkInfo, ValidPieceIndex};
@@ -30,6 +31,8 @@ pub(crate) struct Peer {
     state: PeerState,
     pub stats: stats::atomic::PeerStats,
     pub outgoing_address: Option<SocketAddr>,
+    /// When we last started connecting to it.
+    last_connect: Option<Instant>,
 }
 
 impl Peer {
@@ -49,6 +52,7 @@ impl Peer {
             state,
             stats: Default::default(),
             outgoing_address: None,
+            last_connect: None,
         }
     }
 
@@ -58,7 +62,13 @@ impl Peer {
             outgoing_address: Some(addr),
             stats: Default::default(),
             state: Default::default(),
+            last_connect: None,
         }
+    }
+
+    /// True unless we started connecting to it less than `age` ago.
+    pub(crate) fn last_connect_is_older_than(&self, age: Duration) -> bool {
+        self.last_connect.is_none_or(|at| at.elapsed() >= age)
     }
 
     pub(crate) fn reconnect_not_needed_peer(
@@ -193,6 +203,7 @@ impl Peer {
             PeerState::Queued | PeerState::NotNeeded => {
                 let (tx, rx) = unbounded_channel();
                 let tx_2 = tx.clone();
+                self.last_connect = Some(Instant::now());
                 self.set_state(PeerState::Connecting(tx), counters);
                 Some((rx, tx_2))
             }

@@ -464,6 +464,28 @@ impl PieceTracker {
         self.steal_ram_piece(peer, peer_avg_time, window, 3.0, &peer_has, &can_steal)
     }
 
+    /// The first wanted piece that's waiting for a peer: no peer has it, or the one that
+    /// has it sent nothing for `RAM_STALL`, so the next peer that asks may take it over.
+    pub(crate) fn waiting_ram_piece(&self, window: &RamWindow) -> Option<u32> {
+        let lengths = *self.chunks.get_lengths();
+        window.first(self.chunks.get_have_pieces().as_slice(), |p| {
+            lengths.validate_piece_index(p).is_some_and(|p| {
+                !self.verifying.contains(&p)
+                    && self
+                        .inflight
+                        .get(&p)
+                        .is_none_or(|info| self.last_heard(info).elapsed() >= RAM_STALL)
+            })
+        })
+    }
+
+    /// When the piece's peer last sent a chunk of any piece, or took this one if that's later.
+    fn last_heard(&self, info: &InflightPiece) -> Instant {
+        self.last_delivery
+            .get(&info.peer)
+            .map_or(info.started, |&at| at.max(info.started))
+    }
+
     /// Takes over the most urgent wanted piece that another peer has sent nothing of for
     /// `RAM_STALL`, or has had for `slower` times this peer's average piece time (3 times for
     /// a piece a reader is at). The chunks already received stay; only the missing ones are
@@ -488,11 +510,7 @@ impl PieceTracker {
                 let rank = window.rank(p.get())?;
                 let limit = if rank == 0 { urgent_after } else { slow_after };
                 // Quiet: the owner sent nothing at all since it took the piece.
-                let heard = self
-                    .last_delivery
-                    .get(&info.peer)
-                    .map_or(info.started, |&at| at.max(info.started));
-                let stuck = heard.elapsed() >= RAM_STALL
+                let stuck = self.last_heard(info).elapsed() >= RAM_STALL
                     || limit.is_some_and(|limit| info.started.elapsed() >= limit);
                 stuck.then_some((rank, p))
             })
@@ -1201,6 +1219,35 @@ mod tests {
             from_peer: peer(1),
         });
         assert_eq!(take(&mut tracker, 3.0), rest);
+    }
+
+    #[test]
+    fn a_wanted_piece_waits_until_a_peer_takes_it() {
+        let mut tracker = PieceTracker::new(make_test_chunk_tracker(5));
+        let (p0, p1) = (index(&tracker, 0), index(&tracker, 1));
+        let window = RamWindow::interleave(&[(0, 5)], 2);
+        assert_eq!(tracker.waiting_ram_piece(&window), Some(0));
+        tracker.reserve_piece(p0, peer(1));
+        assert_eq!(tracker.waiting_ram_piece(&window), Some(1));
+        // A piece being checked isn't waiting for a peer either.
+        tracker.verifying.insert(p1);
+        assert_eq!(tracker.waiting_ram_piece(&window), None);
+        tracker.finish_verifying(p1);
+        tracker.reserve_piece(p1, peer(2));
+        assert_eq!(
+            tracker.waiting_ram_piece(&window),
+            None,
+            "piece 2 is past the window"
+        );
+        // Peer 2 took its piece RAM_STALL ago and has sent nothing since: another may take it.
+        tracker.inflight.get_mut(&p1).unwrap().started -= RAM_STALL;
+        assert_eq!(tracker.waiting_ram_piece(&window), Some(1));
+        // A chunk of any piece shows it's still sending.
+        tracker.delivered_by(peer(2));
+        assert_eq!(tracker.waiting_ram_piece(&window), None);
+        // Peer 1 died: its piece waits again.
+        tracker.release_pieces_owned_by(peer(1));
+        assert_eq!(tracker.waiting_ram_piece(&window), Some(0));
     }
 
     #[test]

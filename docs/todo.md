@@ -13,6 +13,7 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 - [ ] The IPv4-only mode on a system that really has no IPv6 (a Keenetic without that component): the tests only ask for it with `--ipv4-only`, and the DHT stays off in them
 - [ ] The local network prompt the first time other devices are allowed
 - [ ] Downloading from all peers at once on a real swarm: the speed, and that the piece a player waits for still arrives first
+- [ ] Peers that close an idle connection come back when playback goes on: seen with the local test peers, and once on the router, for the first ten seconds after a five-minute pause ([measurements](development.md#measurements)). Still open: a whole film, with `active_peers` and the speed from `/api/status` recorded throughout (`tests/watch.py`), to see that the peers don't dwindle
 
 ## Performance
 
@@ -25,6 +26,9 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 - [ ] A peer that drops mid-piece loses what it sent: `release_pieces_owned_by` clears the piece's chunks, even in RAM mode where the slot and its data stay. Keep them, as for a piece taken over
 - [ ] 16 outstanding requests per peer cap each peer at 256 KiB per round trip: about 2.5 MB/s at 100 ms, as through a VPN. Size the window from each peer's rate
 - [ ] A seek doesn't retry peers that are waiting out their reconnect backoff (10 s, then a minute, then six) after a real disconnect
+- [ ] A peer that keeps us choked is dropped after 15 s and then backs off for longer each time, so a busy seeder's next free upload slot is mostly missed (on the router one such peer was connected four times for 32 KiB). While no other peer waits for its place among the 20, staying connected costs nothing
+- [ ] A peer nothing is asked of keeps an upload slot at its end until it closes the connection (60 s with qBittorrent). Telling it we're not interested after a while would free the slot, and qBittorrent's engine then keeps the connection for ten minutes at least (longer while it has connections to spare), so coming back would take one message instead of a new connection
+- [ ] A peer that chokes us with requests outstanding has dropped them, but they stay counted as owed until the 15 s read timeout drops the peer
 
 ## Security
 
@@ -46,6 +50,7 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 - [ ] Play is a link, which Tab skips in WKWebView (`tabFocusesLinks` is off); the license and peer lists can't be scrolled by keyboard; focus falls back to the page when Add or Stop hides the focused control
 - [ ] Some light-theme colors are under 4.5:1 contrast (the banner, muted labels and hints), and the switch's off state is hard to see
 - [ ] Stop shows "Adding torrent…" while the add/stop lock is held; report adding and stopping separately
+- [ ] While a player is paused the window can show 0 peers, once they have closed their idle connections. They come back with the next piece; say so, or show how many are set aside (Lampa's `total_peers` counts them)
 - [ ] ⌘O or a drop while an add runs gets a raw 409 that stays in the banner; dropping a file that isn't a .torrent gives confusing errors
 - [ ] The "server stopped" alert shows raw, colored log text, and failed requests show "Load failed"
 - [ ] The error banner and network messages are rewritten on every poll, which screen readers may repeat
@@ -59,6 +64,7 @@ Nothing here is committed to; it's a list of things noticed so far. Rough priori
 - [ ] A build for the many Keenetic models with MIPS processors; only ARM64 ones can run today's
 - [ ] The router's start script holds its settings (address, cache, peers), so a newer script replaces them; read them from a file of their own
 - [ ] On a router the server can only be switched off and on over SSH, with the start script; nothing in the page or the router's web interface does it
+- [ ] A build of the working tree calls itself by the last release's number, so `/api/status` can't tell it from that release: on the router only the file's checksum shows which build runs. Add the commit to `--version` and `/api/status`
 - [ ] A page from an origin the server doesn't accept gets a bare 403, and nothing tells the person at the TV why: Lampa's settings even mark the address as found, because that check is a plain request with no origin. Say it in the log and on the control page, with the origin and how to allow it
 - [ ] Lampa's own code names `https://yumata.github.io/lampa/` as a place its files are served from; the server accepts only `lampa.mx` and `lampa.app`
 - [ ] TorrServer also sends `transferMode.dlna.org: Streaming` with a stream and answers a player's `getcontentFeatures.dlna.org`. The Samsung TV's player asks for neither, and no player that needs them has been seen, so the server sends neither
